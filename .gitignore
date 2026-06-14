@@ -1,0 +1,20 @@
+# Environment files
+.env
+.env.*
+.env.local
+.env.*.local
+
+# Model files
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.bin
+*.h5
+*.pkl
+*.onnx
+*.pb
+*.tflite
+models/
+checkpoints/
+weights/

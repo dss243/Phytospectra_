@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.pyc
+
+# Virtual environment
+venv/
+
+# Environment variables
+.env
+
+# Outputs
+output_heatmaps/
+
+# Model weights
+weights/
+
+# VS Code
+.vscode/
+
+# OS files
+.DS_Store
+Thumbs.db

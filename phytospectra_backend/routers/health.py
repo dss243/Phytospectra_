@@ -1,0 +1,90 @@
+from fastapi import APIRouter, Request, Depends
+import httpx
+import jwt as pyjwt
+from jwt.algorithms import ECAlgorithm
+import json
+
+from core.config import settings
+from core.auth import get_current_user
+from services.supabase_service import get_supabase
+
+router = APIRouter(tags=["Health"])
+
+
+@router.get("/health")
+async def health_check():
+    from pathlib import Path
+    from services.inference import _BACKEND_ROOT as vit_root
+    vit = vit_root / "models" / "vit_ndvi_leaf_health.pt"
+    seg = vit_root / "models" / "segformer_b0_v5_1.pt"
+    return {
+        "status": "ok",
+        "models": {
+            "vit_ndvi_leaf_health.pt": vit.exists(),
+            "segformer_b0_v5_1.pt": seg.exists(),
+        },
+    }
+
+
+@router.post("/debug/token")
+async def debug_token(request: Request):
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        return {"error": "No Bearer token found"}
+
+    token = auth.split(" ", 1)[1]
+
+    try:
+        header = pyjwt.get_unverified_header(token)
+    except Exception as e:
+        return {"error": f"Cannot read token header: {e}"}
+
+    try:
+        async with httpx.AsyncClient() as client:
+            res = await client.get(
+                f"{settings.SUPABASE_URL}/auth/v1/.well-known/jwks.json",
+                timeout=10
+            )
+            jwks = res.json()
+            key_data = jwks["keys"][0]
+            public_key = ECAlgorithm.from_jwk(json.dumps(key_data))
+
+        verified = pyjwt.decode(
+            token,
+            public_key,
+            algorithms=["ES256"],
+            options={"verify_aud": False}
+        )
+        return {"status": "✅ ES256 OK", "header": header, "claims": verified}
+
+    except Exception as e:
+        return {"status": "❌ FAILED", "error": str(e), "header": header}
+
+@router.get("/debug/keys")
+async def debug_keys():
+    from services.supabase_service import get_supabase
+    import jwt as pyjwt
+    client = get_supabase()
+    key = client.supabase_key
+    claims = pyjwt.decode(key, options={"verify_signature": False})
+    return {
+        "role": claims.get("role"),  # should say "service_role" not "anon"
+        "key_preview": key[:40] + "..."
+    }
+    
+    
+@router.get("/debug/bucket")
+async def debug_bucket(user=Depends(get_current_user)):
+    client = get_supabase()
+    user_id = user.get("sub")
+
+    root_files = client.storage.from_(settings.SUPABASE_BUCKET_RAW).list()
+    user_files = client.storage.from_(settings.SUPABASE_BUCKET_RAW).list(user_id)
+
+    return {
+        "bucket": settings.SUPABASE_BUCKET_RAW,
+        "root_files": root_files,
+        "user_folder_files": user_files,
+        "user_id": user_id,
+        "looking_for": f"{user_id}/satellite.PNG"
+    }
