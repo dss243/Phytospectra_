@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, useCallback } from "react";
 import { Send, Bot, User, Loader2, Trash2 } from "lucide-react";
 import { ChatMessageContent } from "@/components/ChatMessageContent";
 import { IconBox } from "@/components/IconBox";
-import { getBackendBaseUrl } from "@/lib/backend";
+import { getBackendBaseUrl, backendFetch } from "@/lib/backend";
 
 interface Message {
   role: "user" | "assistant";
@@ -70,7 +70,7 @@ export default function ChatBot() {
     const payload = buildPayload(history);
 
     try {
-      const res = await fetch(`${backendBaseUrl}/api/chat`, {
+      const res = await backendFetch(`/api/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ messages: payload }),

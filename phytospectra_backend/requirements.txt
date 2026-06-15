@@ -21,9 +21,9 @@ Pillow
 exifread
 matplotlib
 
-# ML inference (CPU wheels — use GPU build if you have CUDA)
-torch
-torchvision
+# ML inference — CPU wheels (install: pip install torch==2.6.0 torchvision==0.21.0 --index-url https://download.pytorch.org/whl/cpu)
+torch==2.6.0
+torchvision==0.21.0
 transformers
 
 # Simulation script only (optional)

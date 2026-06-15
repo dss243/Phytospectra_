@@ -2,8 +2,6 @@ import { useEffect, useState } from "react";
 import { useAuth } from "./useAuth";
 import { makeAuthedClient } from "@/lib/api";
 
-const WS_BASE = import.meta.env.VITE_WS_URL ?? "ws://localhost:8000";
-
 export interface ConversationRequest {
   id: string;
   farmer_id: string;

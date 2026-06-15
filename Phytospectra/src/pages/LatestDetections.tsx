@@ -6,7 +6,7 @@ import { Radar } from "lucide-react";
 import { useAuth } from "@/hooks/useAuth";
 import { supabase } from "@/integrations/supabase/client";
 import { DetectionMessage } from "@/types/backend";
-import { getBackendBaseUrl } from "@/lib/backend";
+import { getBackendBaseUrl, backendFetch } from "@/lib/backend";
 
 function getTokenFromSession() {
   return supabase.auth.getSession().then(({ data }) => {
@@ -29,7 +29,7 @@ export default function LatestDetections() {
     setError(null);
     try {
       const token = await getTokenFromSession();
-      const res = await fetch(`${backendBaseUrl}/api/detections/latest`, {
+      const res = await backendFetch(`/api/detections/latest`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (!res.ok) throw new Error(await res.text());

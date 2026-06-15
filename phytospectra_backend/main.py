@@ -4,6 +4,9 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from core.config import settings
+from core.role import is_field_pc, machine_role
+from core.camera_bridge import bridge_base_url, remote_camera_bridge_enabled
+from core.field_bridge_ws import field_ws_connected, start_field_bridge_client
 from core.watcher import start_watcher
 from routers import websocket, flights, detections, health, analyze
 from routers import uploads, fields, drones, images, camera, esp32
@@ -20,17 +23,41 @@ logging.basicConfig(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Pre-load SegFormer so the first gallery job skips ~10s model load.
-    try:
-        from services.segformer_inference import preload_segformer
-        await asyncio.to_thread(preload_segformer)
-        logging.getLogger(__name__).info("SegFormer preloaded (%s)", settings.MODEL_WEIGHTS_PATH)
-    except Exception as e:
-        logging.getLogger(__name__).warning("SegFormer preload skipped: %s", e)
+    log = logging.getLogger(__name__)
+    role = machine_role()
+    field = is_field_pc()
+    log.info("Machine role: %s", role)
 
-    watcher_task = asyncio.create_task(start_watcher())
+    if field:
+        log.info("Field mode — skipping ML preload")
+    else:
+        try:
+            from services.segformer_inference import preload_segformer
+            await asyncio.to_thread(preload_segformer)
+            log.info("SegFormer preloaded (%s)", settings.MODEL_WEIGHTS_PATH)
+        except Exception as e:
+            log.warning("SegFormer preload skipped: %s", e)
+
+    if not field:
+        try:
+            from core.auth import get_supabase_public_key
+            await get_supabase_public_key()
+            log.info("Supabase JWKS preloaded for offline JWT checks")
+        except Exception as e:
+            log.warning("JWKS preload skipped (start backend with internet once): %s", e)
+
+    if remote_camera_bridge_enabled():
+        log.info("Home server — camera relay via %s", bridge_base_url())
+    elif field:
+        log.info("Field mode — camera at %s", settings.CAMERA_IP)
+        if settings.HOME_SERVER_PUBLIC_URL:
+            await start_field_bridge_client()
+            log.info("Auto-connecting to %s", settings.HOME_SERVER_PUBLIC_URL)
+
+    watcher_task = asyncio.create_task(start_watcher()) if not field else None
     yield
-    watcher_task.cancel()
+    if watcher_task:
+        watcher_task.cancel()
 
 app = FastAPI(
     title="Phytospectra API",
@@ -39,12 +66,13 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-from fastapi.middleware.cors import CORSMiddleware
+_cors = settings.cors_origins_list
+_wildcard = len(_cors) == 1 and _cors[0] in ("*", "http://*")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # or ["http://10.0.31.38:8080"] to be specific
-    allow_credentials=True,
+    allow_origins=["*"] if _wildcard else _cors,
+    allow_credentials=not _wildcard,
     allow_methods=["*"],
     allow_headers=["*"],
 )

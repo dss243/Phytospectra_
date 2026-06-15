@@ -16,7 +16,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { useAuth } from "@/hooks/useAuth";
 import { supabase } from "@/integrations/supabase/client";
-import { getBackendBaseUrl } from "@/lib/backend";
+import { getBackendBaseUrl, backendFetch } from "@/lib/backend";
 import { Field, Flight } from "@/types/backend";
 
 async function getToken(): Promise<string> {
@@ -92,7 +92,7 @@ export function useFieldFlightSelect(
       setError(null);
       try {
         const token = await getToken();
-        const res = await fetch(`${backendBaseUrl}/api/fields`, {
+        const res = await backendFetch(`/api/fields`, {
           headers: { Authorization: `Bearer ${token}` },
         });
         if (!res.ok) throw new Error(await res.text());

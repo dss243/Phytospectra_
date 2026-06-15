@@ -1,4 +1,4 @@
-import { getBackendBaseUrl } from "@/lib/backend";
+import { getBackendBaseUrl, getBackendRequestHeaders, backendHeaders } from "@/lib/backend";
 
 export type ApiError = {
   detail?: string;
@@ -15,17 +15,14 @@ async function authedFetch<T>(args: {
   const backendBaseUrl = getBackendBaseUrl();
   const url = `${backendBaseUrl}${args.path}`;
 
-  const headers: Record<string, string> = {
+  const headers = backendHeaders({
     Accept: "application/json",
-  };
+    ...(args.token ? { Authorization: `Bearer ${args.token}` } : {}),
+    ...(args.body !== undefined ? { "Content-Type": "application/json" } : {}),
+  });
 
-  if (args.token) headers.Authorization = `Bearer ${args.token}`;
-
-  let body: BodyInit | undefined = undefined;
-  if (args.body !== undefined) {
-    headers["Content-Type"] = "application/json";
-    body = JSON.stringify(args.body);
-  }
+  const body: BodyInit | undefined =
+    args.body !== undefined ? JSON.stringify(args.body) : undefined;
 
   const res = await fetch(url, {
     method: args.method,

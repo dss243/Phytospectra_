@@ -21,7 +21,7 @@ _IDX_TO_NAME = {0: "healthy", 1: "stressed"}
 _NORM_MEAN   = [0.485, 0.456, 0.406, 0.0]
 _NORM_STD    = [0.229, 0.224, 0.225, 0.5]
 _NDVI_EPS    = 1e-6
-_DEVICE      = "cuda" if torch.cuda.is_available() else "cpu"
+_DEVICE      = "cpu"
 
 
 @lru_cache(maxsize=1)

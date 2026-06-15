@@ -1,6 +1,6 @@
 import { useEffect, useCallback, useRef } from "react";
 import { useAuth } from "./useAuth";
-import { getBackendBaseUrl } from "@/lib/backend";
+import { backendFetch, backendHeaders } from "@/lib/backend";
 
 const UPDATE_INTERVAL_MS = 5 * 60 * 1000;
 
@@ -12,7 +12,7 @@ export function useAgronomistLocation() {
   const pushLocation = useCallback(async (lat: number, lng: number) => {
     if (!session?.access_token) return;
     try {
-      const res = await fetch(`${getBackendBaseUrl()}/api/profile/location`, {
+      const res = await backendFetch("/api/profile/location", {
         method: "PATCH",
         headers: {
           Authorization: `Bearer ${session.access_token}`,

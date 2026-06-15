@@ -8,7 +8,7 @@ import { useAuth } from "@/hooks/useAuth";
 import { supabase } from "@/integrations/supabase/client";
 import { Field } from "@/types/backend";
 import { Sprout, MapPin, Leaf, AlertTriangle, CheckCircle2, Pencil, Wheat } from "lucide-react";
-import { getBackendBaseUrl } from "@/lib/backend";
+import { getBackendBaseUrl, backendFetch } from "@/lib/backend";
 import { MapContainer, TileLayer, FeatureGroup } from "react-leaflet";
 import { EditControl } from "react-leaflet-draw";
 import "leaflet/dist/leaflet.css";
@@ -149,7 +149,7 @@ export default function Fields() {
       setError(null);
       try {
         const token = await getTokenFromSession();
-        const res = await fetch(`${backendBaseUrl}/api/fields`, {
+        const res = await backendFetch(`/api/fields`, {
           headers: { Authorization: `Bearer ${token}` },
         });
         if (!res.ok) throw new Error(await res.text());
@@ -195,7 +195,7 @@ export default function Fields() {
       const token = await getTokenFromSession();
 
       // 1 — Create field
-      const fieldRes = await fetch(`${backendBaseUrl}/api/fields`, {
+      const fieldRes = await backendFetch(`/api/fields`, {
         method: "POST",
         headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -212,7 +212,7 @@ export default function Fields() {
 
       // 2 — Optionally create & auto-assign drone
       if (draft.drone_name?.trim()) {
-        const droneRes = await fetch(`${backendBaseUrl}/api/drones`, {
+        const droneRes = await backendFetch(`/api/drones`, {
           method: "POST",
           headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -242,7 +242,7 @@ export default function Fields() {
     setError(null);
     try {
       const token = await getTokenFromSession();
-      const res = await fetch(`${backendBaseUrl}/api/fields/${field_id}`, {
+      const res = await backendFetch(`/api/fields/${field_id}`, {
         method: "DELETE",
         headers: { Authorization: `Bearer ${token}` },
       });

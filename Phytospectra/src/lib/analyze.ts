@@ -1,4 +1,4 @@
-import { getBackendBaseUrl, getBackendWsBaseUrl } from "@/lib/backend";
+import { getBackendBaseUrl, getBackendWsBaseUrl, backendFetch, backendHeaders } from "@/lib/backend";
 
 export type AnalyzeResult = {
   zone_id: string;
@@ -140,12 +140,12 @@ export async function analyzeRunHttp(
 ): Promise<AnalyzeResult> {
   onProgress?.("Running ViT classification (vit_ndvi_leaf_health.pt)…");
 
-  const res = await fetch(`${baseUrl}/api/analyze/run`, {
+  const res = await backendFetch("/api/analyze/run", {
     method: "POST",
-    headers: {
+    headers: backendHeaders({
       Authorization: `Bearer ${token}`,
       "Content-Type": "application/json",
-    },
+    }),
     body: JSON.stringify({
       object_path: params.object_path,
       bucket: params.bucket,

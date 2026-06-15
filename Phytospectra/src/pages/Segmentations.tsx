@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { useParams, Link, useLocation } from "react-router-dom";
 import { useAuth } from "@/hooks/useAuth";
 import { supabase } from "@/integrations/supabase/client";
-import { getBackendBaseUrl } from "@/lib/backend";
+import { getBackendBaseUrl, backendFetch, backendHeaders } from "@/lib/backend";
 import { resolveMaskUrls, type MaskResult } from "@/lib/maskUrls";
 
 type DisplayRow = MaskResult & {
@@ -54,9 +54,9 @@ export default function Segmentations() {
     setError(null);
     try {
       const token = await getTokenFromSession();
-      const headers = { Authorization: `Bearer ${token}` };
+      const headers = backendHeaders({ Authorization: `Bearer ${token}` });
 
-      let res = await fetch(`${backendBaseUrl}/api/segment/flight/${flight_id}`, { headers });
+      let res = await backendFetch(`/api/segment/flight/${flight_id}`, { headers });
       if (!res.ok) throw new Error(await res.text());
 
       let json = await res.json();
@@ -64,7 +64,7 @@ export default function Segmentations() {
 
       if (results.length === 0 && runIfEmpty) {
         setRunning(true);
-        res = await fetch(`${backendBaseUrl}/api/segment/flight/${flight_id}`, {
+        res = await backendFetch(`/api/segment/flight/${flight_id}`, {
           method: "POST",
           headers,
         });

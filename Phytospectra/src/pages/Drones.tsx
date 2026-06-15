@@ -8,7 +8,7 @@ import { Label } from "@/components/ui/label";
 import { useAuth } from "@/hooks/useAuth";
 import { supabase } from "@/integrations/supabase/client";
 import { Field } from "@/types/backend";
-import { getBackendBaseUrl } from "@/lib/backend";
+import { getBackendBaseUrl, backendFetch } from "@/lib/backend";
 
 function getTokenFromSession() {
   return supabase.auth.getSession().then(({ data }) => {
@@ -79,10 +79,10 @@ export default function Drones() {
 
         // load fields and drones in parallel
         const [fieldsRes, dronesRes] = await Promise.all([
-          fetch(`${backendBaseUrl}/api/fields`, {
+          backendFetch(`/api/fields`, {
             headers: { Authorization: `Bearer ${token}` },
           }),
-          fetch(`${backendBaseUrl}/api/drones`, {
+          backendFetch(`/api/drones`, {
             headers: { Authorization: `Bearer ${token}` },
           }),
         ]);
@@ -120,7 +120,7 @@ export default function Drones() {
     setError(null);
     try {
       const token = await getTokenFromSession();
-      const res = await fetch(`${backendBaseUrl}/api/drones`, {
+      const res = await backendFetch(`/api/drones`, {
         method: "POST",
         headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -166,7 +166,7 @@ export default function Drones() {
     setError(null);
     try {
       const token = await getTokenFromSession();
-      const res = await fetch(`${backendBaseUrl}/api/drones/${drone_id}`, {
+      const res = await backendFetch(`/api/drones/${drone_id}`, {
         method: "PATCH",
         headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -200,7 +200,7 @@ export default function Drones() {
     setError(null);
     try {
       const token = await getTokenFromSession();
-      const res = await fetch(`${backendBaseUrl}/api/drones/${drone_id}`, {
+      const res = await backendFetch(`/api/drones/${drone_id}`, {
         method: "DELETE",
         headers: { Authorization: `Bearer ${token}` },
       });

@@ -1,4 +1,6 @@
-/** MAPIR / Novatek WiFi defaults (override with VITE_CAMERA_IP). */
+/** MAPIR camera — browser → cloud backend (ngrok) → PC → camera hotspot. */
+import { backendFetch, backendHeaders } from "@/lib/backend";
+
 export const CAMERA_HOST =
   (import.meta.env.VITE_CAMERA_IP as string | undefined)?.trim() || "192.168.1.254";
 
@@ -6,9 +8,16 @@ export const CAMERA_PHOTO_DIR = "/DCIM/PHOTO";
 
 const IMAGE_EXT = /\.(jpe?g|tiff?|png|raw)$/i;
 
-/** Dev-only: Vite proxies /camera-proxy → camera IP. */
-function usesViteCameraProxy() {
-  return import.meta.env.DEV;
+let _authToken: string | null = null;
+
+export function setCameraAuthToken(token: string | null) {
+  _authToken = token;
+}
+
+function cameraAuthHeaders(extra?: HeadersInit): Record<string, string> {
+  const out = backendHeaders(extra);
+  if (_authToken) out.Authorization = `Bearer ${_authToken}`;
+  return out;
 }
 
 function cameraPath(path: string, query = ""): string {
@@ -17,35 +26,23 @@ function cameraPath(path: string, query = ""): string {
   return `${p}${q}`;
 }
 
-/**
- * URL to reach the camera from the farmer's browser.
- * On MAPIR Wi‑Fi the phone/laptop talks to the camera directly — no local backend.
- */
-export function cameraProxyUrl(path: string, query = ""): string {
+/** Proxy path without leading slash, optional ?query for backend route. */
+function proxyTarget(path: string, query = ""): string {
   const rel = cameraPath(path, query);
-  if (usesViteCameraProxy()) {
-    return `/camera-proxy${rel}`;
+  return rel.startsWith("/") ? rel.slice(1) : rel;
+}
+
+async function cameraFetch(path: string, query = "", init?: RequestInit): Promise<Response> {
+  if (import.meta.env.DEV) {
+    return fetch(`/camera-proxy${cameraPath(path, query)}`, {
+      ...init,
+      headers: cameraAuthHeaders(init?.headers),
+    });
   }
-  return `http://${CAMERA_HOST}${rel}`;
-}
-
-export function cameraPhotoUrl(filename: string): string {
-  return cameraProxyUrl(`${CAMERA_PHOTO_DIR}/${filename}`);
-}
-
-export function cameraCaptureUrl(): string {
-  return cameraProxyUrl("/", "custom=1&cmd=1001");
-}
-
-export const CAMERA_PROBE_PATHS = [
-  CAMERA_PHOTO_DIR,
-  "/",
-  "/?custom=1&cmd=3016",
-];
-
-async function cameraFetch(path: string, init?: RequestInit): Promise<Response> {
-  const url = path.startsWith("http") ? path : cameraProxyUrl(path);
-  return fetch(url, init);
+  return backendFetch(`/api/camera/proxy/${proxyTarget(path, query)}`, {
+    ...init,
+    headers: cameraAuthHeaders(init?.headers),
+  });
 }
 
 export function parseCameraFileListHtml(html: string): string[] {
@@ -62,7 +59,7 @@ export function parseCameraFileListHtml(html: string): string[] {
       }
     }
   } catch {
-    // fall through to regex
+    // regex fallback below
   }
 
   if (names.length === 0) {
@@ -81,27 +78,21 @@ export function parseCameraFileListHtml(html: string): string[] {
 }
 
 export async function fetchCameraFileList(): Promise<string[]> {
-  const endpoints: Array<string | { path: string; query: string }> = [
-    CAMERA_PHOTO_DIR,
+  const endpoints: Array<{ path: string; query?: string }> = [
+    { path: CAMERA_PHOTO_DIR },
     { path: "/get_file_info.cgi", query: `DIR=${encodeURIComponent(CAMERA_PHOTO_DIR)}` },
   ];
 
-  for (const endpoint of endpoints) {
+  for (const { path, query } of endpoints) {
     try {
-      const url =
-        typeof endpoint === "string"
-          ? cameraProxyUrl(endpoint)
-          : cameraProxyUrl(endpoint.path, endpoint.query);
-      const res = await fetch(url);
+      const res = await cameraFetch(path, query ?? "");
       if (!res.ok) continue;
-      const text = await res.text();
-      const names = parseCameraFileListHtml(text);
+      const names = parseCameraFileListHtml(await res.text());
       if (names.length > 0) return names;
     } catch {
-      // try next endpoint
+      // try next
     }
   }
-
   return [];
 }
 
@@ -112,25 +103,148 @@ export async function downloadCameraPhoto(filename: string): Promise<Blob> {
 }
 
 export async function triggerCameraCapture(): Promise<void> {
-  const res = await fetch(cameraCaptureUrl());
+  const res = await cameraFetch("/", "custom=1&cmd=1001");
   if (!res.ok) throw new Error(`Capture failed: HTTP ${res.status}`);
 }
 
+export async function fetchCameraParams(
+  query = "param=battery_level,storage_free,gps_status",
+): Promise<string> {
+  const res = await cameraFetch("/get_params.cgi", query);
+  if (!res.ok) throw new Error(`Params failed: HTTP ${res.status}`);
+  return res.text();
+}
+
 export async function probeCameraViaProxy(
-  timeoutMs = 8000,
+  timeoutMs = 45000,
 ): Promise<{ ok: boolean; path?: string; error?: string }> {
-  for (const path of CAMERA_PROBE_PATHS) {
-    try {
-      const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), timeoutMs);
-      const res = await cameraFetch(path, { signal: ctrl.signal });
-      clearTimeout(timer);
-      if (res.ok) {
-        return { ok: true, path };
-      }
-    } catch {
-      // try next path
-    }
+  if (!_authToken) {
+    return { ok: false, error: "Sign in first, then try again." };
   }
-  return { ok: false, error: "No response from camera at " + CAMERA_HOST };
+
+  // Step 1 — can the browser reach the PC backend through ngrok?
+  try {
+    const health = await backendFetch("/api/health", {
+      headers: cameraAuthHeaders(),
+      signal: AbortSignal.timeout(12000),
+    });
+    if (!health.ok) {
+      return {
+        ok: false,
+        error:
+          "Backend is up but unhealthy. Restart uvicorn on the PC and try again.",
+      };
+    }
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return {
+      ok: false,
+      error:
+        "Cannot reach your PC through ngrok (timed out). On the PC: keep uvicorn + ngrok running, " +
+        "stay on MAPIR Wi‑Fi, and keep USB phone tethering ON so ngrok still has internet. " +
+        "On the phone, open the ngrok URL /api/health in the browser to test. " +
+        `(${msg})`,
+    };
+  }
+
+  // Step 2 — can the PC backend reach the camera?
+  try {
+    const res = await backendFetch("/api/camera/ping", {
+      headers: cameraAuthHeaders(),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (res.ok) {
+      const json = await res.json();
+      return { ok: true, path: json.path ?? "/api/camera/ping" };
+    }
+    let detail = await res.text();
+    try {
+      const j = JSON.parse(detail) as { detail?: string };
+      detail = j.detail ?? detail;
+    } catch {
+      /* plain text */
+    }
+    if (res.status === 401) {
+      return {
+        ok: false,
+        error: detail || "Session expired — log out and log in again on phytospectra.vercel.app.",
+      };
+    }
+    if (res.status === 503 || res.status === 502) {
+      return {
+        ok: false,
+        error:
+          detail ||
+          "Backend is online but cannot reach the camera. On the PC: MAPIR Wi‑Fi + test http://192.168.1.254 in a browser on that same PC.",
+      };
+    }
+    return { ok: false, error: detail || `Backend returned HTTP ${res.status}` };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return {
+      ok: false,
+      error: `Backend reachable but camera check timed out. Confirm http://192.168.1.254 opens on the PC. (${msg})`,
+    };
+  }
+}
+
+export async function cameraPhotoBlobUrl(filename: string): Promise<string> {
+  const blob = await downloadCameraPhoto(filename);
+  return URL.createObjectURL(blob);
+}
+
+export type FieldBridgeStatus = {
+  registered_bridge_url?: string | null;
+  env_bridge_url?: string | null;
+  effective_bridge_url?: string | null;
+  registered_at?: string | null;
+  field_hostname?: string | null;
+  websocket_connected?: boolean;
+  mode?: string | null;
+};
+
+export async function getFieldBridgeStatus(): Promise<FieldBridgeStatus | null> {
+  if (!_authToken) return null;
+  try {
+    const res = await backendFetch("/api/camera/bridge/status", {
+      headers: cameraAuthHeaders(),
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!res.ok) return null;
+    return (await res.json()) as FieldBridgeStatus;
+  } catch {
+    return null;
+  }
+}
+
+export async function registerFieldBridge(bridgeUrl: string): Promise<{ ok: boolean; error?: string; status?: FieldBridgeStatus }> {
+  if (!_authToken) {
+    return { ok: false, error: "Sign in first." };
+  }
+  const url = bridgeUrl.trim().replace(/\/$/, "");
+  if (!url.startsWith("https://")) {
+    return { ok: false, error: "Paste the https ngrok URL from the field laptop." };
+  }
+  try {
+    const res = await backendFetch("/api/camera/bridge/register", {
+      method: "POST",
+      headers: { ...cameraAuthHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ bridge_url: url }),
+      signal: AbortSignal.timeout(20000),
+    });
+    if (!res.ok) {
+      let detail = await res.text();
+      try {
+        const j = JSON.parse(detail) as { detail?: string };
+        detail = j.detail ?? detail;
+      } catch {
+        /* plain */
+      }
+      return { ok: false, error: detail || `HTTP ${res.status}` };
+    }
+    const status = (await res.json()) as FieldBridgeStatus;
+    return { ok: true, status };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
 }

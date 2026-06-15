@@ -8,6 +8,10 @@ venv/
 # Environment variables
 .env
 
+# Runtime bridge state (local PC registry)
+field_bridge_registry.json
+venv-bridge/
+
 # Outputs
 output_heatmaps/
 

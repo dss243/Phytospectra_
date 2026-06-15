@@ -1,0 +1,13 @@
+__pycache__
+*.pyc
+venv
+.env
+.env.*
+.git
+.vscode
+output_heatmaps
+test_results
+*.pt
+*.pth
+.DS_Store
+Thumbs.db

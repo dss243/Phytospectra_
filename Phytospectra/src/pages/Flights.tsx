@@ -19,7 +19,7 @@ import type { LucideIcon } from "lucide-react";
 import { useAuth } from "@/hooks/useAuth";
 import { supabase } from "@/integrations/supabase/client";
 import { Field, Flight } from "@/types/backend";
-import { getBackendBaseUrl } from "@/lib/backend";
+import { getBackendBaseUrl, backendFetch } from "@/lib/backend";
 
 function getTokenFromSession() {
   return supabase.auth.getSession().then(({ data }) => {
@@ -215,33 +215,13 @@ export default function Flights() {
   const [error, setError]     = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [draft, setDraft]     = useState<NewFlight>(blank);
-  const [esp32ActiveFlightId, setEsp32ActiveFlightId] = useState<string | null>(null);
-  const [esp32ActiveFieldName, setEsp32ActiveFieldName] = useState<string | null>(null);
 
   const backendBaseUrl = getBackendBaseUrl();
-
-  const loadEsp32Active = useCallback(async () => {
-    try {
-      const token = await getTokenFromSession();
-      const res = await fetch(`${backendBaseUrl}/api/flights/esp32/active`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (!res.ok) return;
-      const data = (await res.json()) as {
-        flight_id?: string | null;
-        field_name?: string | null;
-      };
-      setEsp32ActiveFlightId(data.flight_id ?? null);
-      setEsp32ActiveFieldName(data.field_name ?? null);
-    } catch {
-      /* non-fatal */
-    }
-  }, [backendBaseUrl]);
 
   const loadFlights = useCallback(async (field_id?: string) => {
     const qs = field_id ? `?field_id=${field_id}` : "";
     const token = await getTokenFromSession();
-    const res = await fetch(`${backendBaseUrl}/api/flights${qs}`, {
+    const res = await backendFetch(`/api/flights${qs}`, {
       headers: { Authorization: `Bearer ${token}` },
     });
     if (!res.ok) throw new Error(await res.text());
@@ -259,8 +239,8 @@ export default function Flights() {
         const token = await getTokenFromSession();
 
         const [fieldsRes, dronesRes] = await Promise.all([
-          fetch(`${backendBaseUrl}/api/fields`,  { headers: { Authorization: `Bearer ${token}` } }),
-          fetch(`${backendBaseUrl}/api/drones`,  { headers: { Authorization: `Bearer ${token}` } }),
+          backendFetch(`/api/fields`,  { headers: { Authorization: `Bearer ${token}` } }),
+          backendFetch(`/api/drones`,  { headers: { Authorization: `Bearer ${token}` } }),
         ]);
 
         if (!fieldsRes.ok) throw new Error(await fieldsRes.text());
@@ -281,7 +261,6 @@ export default function Flights() {
 
         const fl = await loadFlights(initialField || undefined);
         if (active) setItems(fl);
-        if (active) await loadEsp32Active();
       } catch (e) {
         if (active) setError(e instanceof Error ? e.message : "Failed to load data");
       } finally {
@@ -291,7 +270,7 @@ export default function Flights() {
 
     run();
     return () => { active = false; };
-  }, [loading, user, backendBaseUrl, preselectedFieldId, loadFlights, loadEsp32Active]);
+  }, [loading, user, backendBaseUrl, preselectedFieldId, loadFlights]);
 
   // When field changes in the form, auto-select the drone assigned to it
   const onFieldChange = async (field_id: string) => {
@@ -322,7 +301,7 @@ export default function Flights() {
     setError(null);
     try {
       const token = await getTokenFromSession();
-      const res = await fetch(`${backendBaseUrl}/api/flights`, {
+      const res = await backendFetch(`/api/flights`, {
         method: "POST",
         headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -336,27 +315,8 @@ export default function Flights() {
       setItems((prev) => [created, ...prev]);
       setCreating(false);
       setDraft((d) => ({ ...d, altitude: undefined }));
-      await loadEsp32Active();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to create flight");
-    } finally {
-      setPending(false);
-    }
-  };
-
-  const onActivateEsp32 = async (flight_id: string) => {
-    setPending(true);
-    setError(null);
-    try {
-      const token = await getTokenFromSession();
-      const res = await fetch(`${backendBaseUrl}/api/flights/${flight_id}/activate-esp32`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (!res.ok) throw new Error(await res.text());
-      await loadEsp32Active();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to set ESP32 target flight");
     } finally {
       setPending(false);
     }
@@ -368,7 +328,7 @@ export default function Flights() {
     setError(null);
     try {
       const token = await getTokenFromSession();
-      const res = await fetch(`${backendBaseUrl}/api/flights/${flight_id}`, {
+      const res = await backendFetch(`/api/flights/${flight_id}`, {
         method: "DELETE",
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -499,34 +459,18 @@ export default function Flights() {
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         {items.map((fl) => {
           const flField = fields.find((f) => f.id === fl.field_id);
-          const isEsp32Target = esp32ActiveFlightId === fl.id;
           return (
-            <Card key={fl.id} className={`p-5 space-y-3 ${isEsp32Target ? "ring-2 ring-primary/40" : ""}`}>
+            <Card key={fl.id} className="p-5 space-y-3">
               <div className="flex items-start justify-between gap-3">
                 <div>
-                  <div className="font-semibold truncate flex items-center gap-2">
+                  <div className="font-semibold truncate">
                     {flField?.field_name || "Unknown field"}
-                    {isEsp32Target && (
-                      <span className="text-[10px] uppercase tracking-wide bg-primary/10 text-primary px-2 py-0.5 rounded-full">
-                        ESP32 target
-                      </span>
-                    )}
                   </div>
                   <div className="text-xs text-muted-foreground">
                     Drone: {fl.drone_name || fl.drone_id || "—"}
                   </div>
                 </div>
                 <div className="flex flex-wrap gap-2 justify-end">
-                  {!isEsp32Target && (
-                    <Button
-                      size="sm"
-                      variant="secondary"
-                      onClick={() => onActivateEsp32(fl.id)}
-                      disabled={pending}
-                    >
-                      Send to ESP32
-                    </Button>
-                  )}
                   <Button size="sm" onClick={() => navigate(`/segmentations/${fl.id}`)} disabled={pending}>
                     Segmentations
                   </Button>

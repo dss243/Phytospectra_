@@ -4,27 +4,46 @@
  * LittleFS uses the spiffs partition (~2.5 MB). Only ONE camera file
  * is stored at a time (/tmp.img). Batch-all-download needs a bigger partition.
  *
- * Backend: uvicorn main:app --host 0.0.0.0 --port 8000
+ * Hosted backend: HTTPS ngrok on home PC (uvicorn + ngrok http 8000).
+ * Create a flight in phytospectra.vercel.app before sync — ESP32 uses latest flight.
  */
 
 #include <WiFi.h>
+#include <WiFiClient.h>
+#include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <FS.h>
 #include <LittleFS.h>
+#include <cstring>
+
+// ── Backend mode ───────────────────────────────────────────────────────────
+// 0 = lab/home LAN (old working setup: ESP32 + PC on same Wi‑Fi, HTTP :8000)
+// 1 = hosted ngrok (HTTPS — ESP32 needs internet, home PC runs uvicorn + ngrok)
+#define USE_NGROK_BACKEND 0
 
 const char* CAM_SSID  = "MAPIR-S3WRGN-dbddbe";
 const char* CAM_PASS  = "12345678";
 const char* CAM_IP    = "192.168.1.254";
 
+// Home Wi‑Fi (same network as PC when USE_NGROK_BACKEND=0)
 const char* HOME_SSID = "dsds";
 const char* HOME_PASS = "0798200237";
 
-const char* BACKEND_URL   = "http://172.16.179.238:8000";
-const char* BACKEND_HOST  = "172.16.179.238";
+#if USE_NGROK_BACKEND
+const char* BACKEND_URL     = "https://unseeing-purity-reluctant.ngrok-free.dev";
+const char* BACKEND_HOST    = "unseeing-purity-reluctant.ngrok-free.dev";
+const uint16_t BACKEND_PORT = 443;
+#else
+// PC running: uvicorn main:app --host 0.0.0.0 --port 8000
+// Set this to YOUR PC's IP on HOME_SSID (ipconfig) — NOT localhost, NOT ESP32 IP
+const char* BACKEND_URL     = "http://172.16.179.238:8000";
+const char* BACKEND_HOST    = "172.16.179.238";
 const uint16_t BACKEND_PORT = 8000;
+#endif
+
 const char* DEVICE_ID     = "esp32-mapir-01";
 const char* ESP32_API_KEY = "esp32-dev-key";
-const char* FW_VERSION    = "2026-06-13g";
+const char* FW_VERSION    = "2026-06-14-lab-v3";
 
 #define CHUNK_SIZE     8192
 #define MAX_IMAGE_SIZE (20 * 1024 * 1024)
@@ -81,6 +100,115 @@ void closeHttp(HTTPClient& http, WiFiClient& client) {
   http.end();
   client.stop();
   delay(50);
+}
+
+void endBackendHttp(HTTPClient& http) {
+  http.end();
+  delay(50);
+}
+
+bool backendIsHttps() {
+#if USE_NGROK_BACKEND
+  return true;
+#else
+  return false;
+#endif
+}
+
+void addBackendHeaders(HTTPClient& http) {
+  http.addHeader("Connection", "close");
+  http.addHeader("X-ESP32-Key", ESP32_API_KEY);
+  if (strstr(BACKEND_HOST, "ngrok") != NULL) {
+    http.addHeader("ngrok-skip-browser-warning", "true");
+  }
+}
+
+int backendGet(const char* path, char* bodyOut, size_t bodyOutLen, int timeoutMs) {
+  if (!bodyOut || bodyOutLen < 2) return -1;
+  bodyOut[0] = '\0';
+
+  char url[384];
+  snprintf(url, sizeof(url), "%s%s", BACKEND_URL, path);
+
+  Serial.printf("GET %s\n", url);
+  Serial.flush();
+
+  HTTPClient http;
+  http.setReuse(false);
+  http.setConnectTimeout(20000);
+  http.setTimeout(timeoutMs);
+
+  WiFiClient plain;
+  WiFiClientSecure tls;
+  bool begun = false;
+
+  if (backendIsHttps()) {
+    tls.setInsecure();
+    Serial.println("  connecting (HTTPS)...");
+    Serial.flush();
+    begun = http.begin(tls, String(url));
+  } else {
+    Serial.println("  connecting (HTTP)...");
+    Serial.flush();
+    begun = http.begin(plain, String(url));
+  }
+
+  if (!begun) {
+    Serial.println("  http.begin() failed");
+    return -1;
+  }
+
+  addBackendHeaders(http);
+
+  unsigned long t0 = millis();
+  int code = http.GET();
+  unsigned long elapsed = millis() - t0;
+
+  if (code > 0) {
+    String payload = http.getString();
+    if (payload.length() >= bodyOutLen) {
+      Serial.printf("Response too large (%u bytes)\n", payload.length());
+      code = -2;
+    } else {
+      strncpy(bodyOut, payload.c_str(), bodyOutLen - 1);
+      bodyOut[bodyOutLen - 1] = '\0';
+      Serial.printf("HTTP %d in %lums (%u bytes)\n", code, elapsed, payload.length());
+    }
+  } else {
+    Serial.printf("HTTP error %d: %s (%lums)\n",
+      code, http.errorToString(code).c_str(), elapsed);
+  }
+
+  endBackendHttp(http);
+  delay(100);
+  return code;
+}
+
+bool waitForValidIp(int maxWaitMs = 10000) {
+  unsigned long start = millis();
+  while (millis() - start < (unsigned long)maxWaitMs) {
+    yield();
+    if (WiFi.status() == WL_CONNECTED && WiFi.localIP() != IPAddress(0, 0, 0, 0)) {
+      return true;
+    }
+    delay(200);
+  }
+  return WiFi.localIP() != IPAddress(0, 0, 0, 0);
+}
+
+bool pingBackend() {
+  char body[128];
+  memset(body, 0, sizeof(body));
+  int code = backendGet("/api/esp32/ping", body, sizeof(body), 20000);
+  if (code == 200) {
+    Serial.printf("Backend ping OK: %s\n", body);
+    return true;
+  }
+  Serial.printf("Backend ping failed HTTP %d\n", code);
+  if (code <= 0) {
+    Serial.println("  Check: home PC uvicorn + ngrok running, ESP32 has internet");
+  }
+  return false;
 }
 
 String jsonValue(const char* body, const char* key) {
@@ -169,50 +297,8 @@ bool scanForMapirSsid(bool forceRescan = false) {
   return true;
 }
 
-int backendGet(const char* path, char* bodyOut, size_t bodyOutLen, int timeoutMs) {
-  if (!bodyOut || bodyOutLen < 2) return -1;
-  bodyOut[0] = '\0';
-
-  WiFiClient client;
-  HTTPClient http;
-  http.setReuse(false);
-  http.setConnectTimeout(15000);
-  if (!http.begin(client, BACKEND_HOST, BACKEND_PORT, path)) {
-    Serial.println("HTTP begin() failed");
-    return -1;
-  }
-  http.addHeader("Connection", "close");
-  http.addHeader("X-ESP32-Key", ESP32_API_KEY);
-  http.setTimeout(timeoutMs);
-
-  Serial.printf("GET %s\n", path);
-  Serial.flush();
-  unsigned long t0 = millis();
-  int code = http.GET();
-  unsigned long elapsed = millis() - t0;
-
-  if (code > 0) {
-    String payload = http.getString();
-    if (payload.length() >= bodyOutLen) {
-      Serial.printf("Response too large (%u bytes)\n", payload.length());
-      code = -2;
-    } else {
-      strncpy(bodyOut, payload.c_str(), bodyOutLen - 1);
-      bodyOut[bodyOutLen - 1] = '\0';
-      Serial.printf("HTTP %d in %lums (%u bytes)\n", code, elapsed, payload.length());
-    }
-  } else {
-    Serial.printf("HTTP error %d: %s (%lums)\n",
-      code, http.errorToString(code).c_str(), elapsed);
-  }
-
-  closeHttp(http, client);
-  delay(100);
-  return code;
-}
-
 bool connectToHomeWiFi() {
-  if (onNetwork(HOME_SSID)) return true;
+  if (onNetwork(HOME_SSID) && waitForValidIp(1000)) return true;
 
   Serial.println("WiFi -> Home");
   WiFi.disconnect(false, false);
@@ -223,7 +309,7 @@ bool connectToHomeWiFi() {
 
   for (int i = 0; i < 30; i++) {
     yield();
-    if (onNetwork(HOME_SSID)) {
+    if (onNetwork(HOME_SSID) && waitForValidIp(3000)) {
       Serial.printf("Connected Home (%s)\n", WiFi.localIP().toString().c_str());
       return true;
     }
@@ -281,7 +367,14 @@ bool fetchMissionConfig() {
     if (code == 404) {
       Serial.println("  Create a flight in the app first");
     } else if (code <= 0) {
-      Serial.println("  Start uvicorn on the PC :8000");
+#if USE_NGROK_BACKEND
+      Serial.println("  Check: home PC uvicorn + ngrok, ESP32 has internet");
+#else
+      Serial.println("  TCP failed — same Wi-Fi as PC? uvicorn on 0.0.0.0:8000?");
+      Serial.printf("  Update BACKEND_HOST to PC ipconfig IP (now %s)\n", BACKEND_HOST);
+      Serial.printf("  ESP32 is %s on %s\n",
+        WiFi.localIP().toString().c_str(), WiFi.SSID().c_str());
+#endif
     }
     return false;
   }
@@ -463,19 +556,94 @@ bool uploadViaBackend(const char* filepath, const char* filename) {
   Serial.printf(">>> UPLOADING %s (%u bytes)\n", filename, (unsigned)fileSize);
   Serial.flush();
 
-  WiFiClient client;
+  if (!backendIsHttps()) {
+    WiFiClient client;
+    if (!client.connect(BACKEND_HOST, BACKEND_PORT)) {
+      Serial.println("Upload HTTP connect failed");
+      file.close();
+      return false;
+    }
+
+    char line[384];
+    snprintf(line, sizeof(line), "POST %s HTTP/1.1\r\n", path);
+    client.print(line);
+    snprintf(line, sizeof(line), "Host: %s\r\n", BACKEND_HOST);
+    client.print(line);
+    snprintf(line, sizeof(line), "Content-Type: %s\r\n", contentTypeForName(filename));
+    client.print(line);
+    snprintf(line, sizeof(line), "X-ESP32-Key: %s\r\n", ESP32_API_KEY);
+    client.print(line);
+    client.print("Connection: close\r\n");
+    snprintf(line, sizeof(line), "Content-Length: %u\r\n\r\n", (unsigned)fileSize);
+    client.print(line);
+
+    size_t sent = 0;
+    while (file.available()) {
+      yield();
+      size_t n = file.read(ioBuf, CHUNK_SIZE);
+      if (n == 0) break;
+      size_t w = client.write(ioBuf, n);
+      if (w != n) {
+        Serial.println("Upload write failed");
+        file.close();
+        client.stop();
+        return false;
+      }
+      sent += w;
+    }
+    file.close();
+
+    unsigned long t0 = millis();
+    while (client.connected() && !client.available() && (millis() - t0) < 30000) {
+      yield();
+      delay(10);
+    }
+
+    char resp[512];
+    size_t respLen = 0;
+    while (client.available() && respLen < sizeof(resp) - 1) {
+      resp[respLen++] = (char)client.read();
+      yield();
+    }
+    resp[respLen] = '\0';
+    client.stop();
+
+    int httpCode = 0;
+    if (strncmp(resp, "HTTP/1.", 7) == 0) {
+      httpCode = atoi(resp + 9);
+    }
+
+    Serial.printf("Upload HTTP %d (%u bytes sent)\n", httpCode, (unsigned)sent);
+    if (httpCode == 200 || httpCode == 201) {
+      Serial.printf(">>> UPLOAD OK image_id=%s\n", jsonValue(resp, "image_id").c_str());
+      return true;
+    }
+    Serial.printf(">>> UPLOAD FAILED HTTP %d\n", httpCode);
+    if (respLen > 0) Serial.printf("  %s\n", resp);
+    return false;
+  }
+
+  WiFiClientSecure client;
+  client.setInsecure();
   if (!client.connect(BACKEND_HOST, BACKEND_PORT)) {
-    Serial.println("Upload TCP connect failed");
+    Serial.println("Upload TLS connect failed");
     file.close();
     return false;
   }
 
-  client.printf("POST %s HTTP/1.1\r\n", path);
-  client.printf("Host: %s\r\n", BACKEND_HOST);
-  client.printf("Content-Type: %s\r\n", contentTypeForName(filename));
-  client.printf("X-ESP32-Key: %s\r\n", ESP32_API_KEY);
+  char line[384];
+  snprintf(line, sizeof(line), "POST %s HTTP/1.1\r\n", path);
+  client.print(line);
+  snprintf(line, sizeof(line), "Host: %s\r\n", BACKEND_HOST);
+  client.print(line);
+  snprintf(line, sizeof(line), "Content-Type: %s\r\n", contentTypeForName(filename));
+  client.print(line);
+  snprintf(line, sizeof(line), "X-ESP32-Key: %s\r\n", ESP32_API_KEY);
+  client.print(line);
+  client.print("ngrok-skip-browser-warning: true\r\n");
   client.print("Connection: close\r\n");
-  client.printf("Content-Length: %u\r\n\r\n", (unsigned)fileSize);
+  snprintf(line, sizeof(line), "Content-Length: %u\r\n\r\n", (unsigned)fileSize);
+  client.print(line);
 
   size_t sent = 0;
   while (file.available()) {
@@ -616,8 +784,9 @@ void runSyncCycle(bool force) {
 
 void setup() {
   Serial.begin(115200);
-  delay(500);
+  delay(1500);
 
+  Serial.println("\n--- boot ---");
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);
   WiFi.persistent(false);
@@ -637,12 +806,23 @@ void setup() {
 
   Serial.printf("MAPIR uploader fw=%s | backend=%s | device=%s\n",
     FW_VERSION, BACKEND_URL, DEVICE_ID);
+#if USE_NGROK_BACKEND
+  Serial.println("Mode: ngrok HTTPS (needs internet on HOME Wi-Fi)");
+#else
+  Serial.println("Mode: lab HTTP (ESP32 + PC on same Wi-Fi)");
+#endif
+  Serial.println("Setup done — starting sync...");
   Serial.flush();
-
-  runSyncCycle(true);
 }
 
+bool firstSync = true;
+
 void loop() {
-  runSyncCycle(false);
+  if (firstSync) {
+    firstSync = false;
+    runSyncCycle(true);
+  } else {
+    runSyncCycle(false);
+  }
   delay(500);
 }

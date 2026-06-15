@@ -1,0 +1,30 @@
+# Production-style stack on a VPS or local machine.
+#
+# 1. Copy phytospectra_backend/.env.example → phytospectra_backend/.env
+# 2. Put model weights in phytospectra_backend/models/:
+#      vit_ndvi_leaf_health.pt
+#      segformer_b0_v5_1.pt
+# 3. docker compose up -d --build
+# 4. Check: curl http://localhost:8000/api/health
+
+services:
+  api:
+    build:
+      context: ./phytospectra_backend
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    env_file:
+      - ./phytospectra_backend/.env
+    environment:
+      DEVICE: cpu
+      HOST: 0.0.0.0
+      PORT: 8000
+    volumes:
+      # Models are gitignored — bind-mount from your machine
+      - ./phytospectra_backend/models:/app/models:ro
+      - api_output:/tmp/phytospectra_output
+    restart: unless-stopped
+
+volumes:
+  api_output:

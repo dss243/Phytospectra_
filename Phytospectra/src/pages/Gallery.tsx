@@ -3,7 +3,7 @@ import { createPortal } from "react-dom";
 import { resolveMaskUrls } from "@/lib/maskUrls";
 import { PageHeader } from "@/components/PageHeader";
 import { supabase } from "@/integrations/supabase/client";
-import { getBackendBaseUrl } from "@/lib/backend";
+import { getBackendBaseUrl, backendFetch, backendHeaders } from "@/lib/backend";
 import {
   X, ChevronDown, ChevronRight, ImageOff, Loader2,
   Layers, CheckCircle2, AlertCircle, RefreshCw,
@@ -699,12 +699,12 @@ export default function Gallery() {
       setError(null);
       try {
         const token   = await getTokenFromSession();
-        const headers = { Authorization: `Bearer ${token}` };
+        const headers = backendHeaders({ Authorization: `Bearer ${token}` });
 
         const [fieldsRes, flightsRes, imagesRes] = await Promise.all([
-          fetch(`${base}/api/fields`,           { headers }),
-          fetch(`${base}/api/flights`,          { headers }),
-          fetch(`${base}/api/images?limit=200`, { headers }),
+          backendFetch("/api/fields",           { headers }),
+          backendFetch("/api/flights",          { headers }),
+          backendFetch("/api/images?limit=200", { headers }),
         ]);
 
         if (!fieldsRes.ok)  throw new Error(`Fields: ${await fieldsRes.text()}`);
@@ -740,7 +740,7 @@ export default function Gallery() {
         await Promise.allSettled(
           flightsData.map(async (fl) => {
             try {
-              const res  = await fetch(`${base}/api/segment/flight/${fl.id}`, { headers });
+              const res  = await backendFetch(`/api/segment/flight/${fl.id}`, { headers });
               if (!res.ok) return;
               const json = await res.json();
               const results: SegResult[] = (json.results ?? []).map((r: any) => ({
@@ -779,10 +779,10 @@ export default function Gallery() {
     setSegStates((prev) => ({ ...prev, [flightId]: { status: "loading" } }));
     try {
       const token = await getTokenFromSession();
-      const url   = `${base}/api/segment/flight/${flightId}${force ? "?force=true" : ""}`;
-      const res   = await fetch(url, {
+      const path = `/api/segment/flight/${flightId}${force ? "?force=true" : ""}`;
+      const res   = await backendFetch(path, {
         method:  "POST",
-        headers: { Authorization: `Bearer ${token}` },
+        headers: backendHeaders({ Authorization: `Bearer ${token}` }),
       });
       if (!res.ok) {
         const msg = await res.text();

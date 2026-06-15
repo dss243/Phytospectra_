@@ -5,7 +5,7 @@ import { useAuth } from "@/hooks/useAuth";
 import logo from "@/assets/phytospectra-logo.jpg";
 import { MapPin, Sprout, Microscope } from "lucide-react";
 import { toast } from "sonner";
-import { getBackendBaseUrl } from "@/lib/backend";
+import { backendFetch, backendHeaders } from "@/lib/backend";
 
 type Role = "farmer" | "agronomist";
 
@@ -14,7 +14,7 @@ async function pushAgronomistLocation(token: string) {
   navigator.geolocation.getCurrentPosition(
     async (pos) => {
       try {
-        await fetch(`${getBackendBaseUrl()}/api/profile/location`, {
+        await backendFetch("/api/profile/location", {
           method: "PATCH",
           headers: {
             Authorization: `Bearer ${token}`,

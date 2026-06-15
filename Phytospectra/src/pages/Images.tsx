@@ -8,7 +8,7 @@ import { Label } from "@/components/ui/label";
 import { useAuth } from "@/hooks/useAuth";
 import { supabase } from "@/integrations/supabase/client";
 import { ImageRow } from "@/types/backend";
-import { getBackendBaseUrl } from "@/lib/backend";
+import { getBackendBaseUrl, backendFetch } from "@/lib/backend";
 
 function getTokenFromSession() {
   return supabase.auth.getSession().then(({ data }) => {
@@ -67,7 +67,7 @@ export default function Images() {
     setError(null);
     try {
       const token = await getTokenFromSession();
-      const res = await fetch(`${backendBaseUrl}/api/images/${id}`, {
+      const res = await backendFetch(`/api/images/${id}`, {
         method: "DELETE",
         headers: { Authorization: `Bearer ${token}` },
       });

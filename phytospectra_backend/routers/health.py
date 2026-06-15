@@ -14,15 +14,36 @@ router = APIRouter(tags=["Health"])
 @router.get("/health")
 async def health_check():
     from pathlib import Path
-    from services.inference import _BACKEND_ROOT as vit_root
-    vit = vit_root / "models" / "vit_ndvi_leaf_health.pt"
-    seg = vit_root / "models" / "segformer_b0_v5_1.pt"
+    backend_root = Path(__file__).resolve().parents[1]
+    vit = backend_root / "models" / "vit_ndvi_leaf_health.pt"
+    seg = backend_root / "models" / "segformer_b0_v5_1.pt"
     return {
         "status": "ok",
         "models": {
-            "vit_ndvi_leaf_health.pt": vit.exists(),
-            "segformer_b0_v5_1.pt": seg.exists(),
+            "vit_ndvi_leaf_health.pt": vit.is_file(),
+            "segformer_b0_v5_1.pt": seg.is_file(),
         },
+    }
+
+
+@router.get("/health/bridge")
+async def health_bridge():
+    """Public — is a field laptop connected for camera relay?"""
+    from core.camera_bridge_registry import bridge_status
+    from core.field_bridge_ws import field_ws_connected, field_ws_status
+
+    st = {**bridge_status(), **field_ws_status()}
+    ws = field_ws_connected()
+    return {
+        "status": "ok" if ws else "no_field_laptop",
+        "field_laptop_ready": ws,
+        "hint": (
+            "User PC: run Install-Phytospectra-Camera.bat once (install only). "
+            "Farmer then uses MAPIR Wi-Fi + USB internet — bridge auto-starts with Windows."
+        )
+        if not ws
+        else None,
+        **st,
     }
 
 
