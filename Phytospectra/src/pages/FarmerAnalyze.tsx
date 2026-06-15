@@ -10,9 +10,10 @@ import {
   AlertTriangle, Image as ImageIcon, UploadCloud, MapPin,
   Camera, Wifi, WifiOff, Plug, PlugZap, RefreshCw,
   FolderOpen, Play, Battery, HardDrive, Loader2,
-  CheckCircle2, XCircle,
+  CheckCircle2, XCircle, Download,
 } from "lucide-react";
 import { backendFetch, backendHeaders, getBackendBaseUrl, probeBackendReachable } from "@/lib/backend";
+import { downloadCameraSetupInstaller } from "@/lib/cameraSetupDownload";
 import { saveFieldsCache, loadFieldsCache } from "@/lib/fieldsCache";
 import { analyzeRunHttp, analyzeFromUploadViaWebSocket, blobToBase64 } from "@/lib/analyze";
 import {
@@ -339,27 +340,36 @@ function CameraPanel({ selectedFieldId, analyzing, onAnalyzeCamera, onError }: C
         </span>
       </div>
 
-      <div className="rounded-lg border border-primary/20 bg-primary/5 px-3 py-2.5 text-xs space-y-2">
-        <p className="font-medium text-foreground">Install once only</p>
-        <ol className="list-decimal list-inside space-y-1 text-muted-foreground">
-          <li>
-            <span className="font-medium text-foreground">One time:</span> run{" "}
-            <span className="font-mono">Install-Phytospectra-Camera.bat</span> on your PC (IT can do this for you)
-          </li>
-          <li>
-            <span className="font-medium text-foreground">Every time:</span> MAPIR Wi‑Fi + USB internet
-          </li>
-          <li>
-            Open this page → green status below → <span className="font-medium text-foreground">Detect camera</span>
-          </li>
-        </ol>
+      <div className="rounded-lg border border-primary/20 bg-primary/5 px-3 py-2.5 text-xs space-y-3">
+        <p className="font-medium text-foreground">First time on this PC?</p>
+        <p className="text-muted-foreground">
+          Click the button below once. Windows may ask &quot;Run anyway&quot; — choose Run. After that you never install again.
+        </p>
+        <Button
+          type="button"
+          size="sm"
+          className="gap-2 w-full sm:w-auto"
+          onClick={() => downloadCameraSetupInstaller()}
+          disabled={!!bridgeStatus?.websocket_connected}
+        >
+          <Download className="h-4 w-4" />
+          Set up this PC (one time)
+        </Button>
+        {bridgeStatus?.websocket_connected ? (
+          <p className="text-green-700 dark:text-green-400 text-[11px]">
+            Already set up on this PC — you can use Detect camera below.
+          </p>
+        ) : (
+          <ol className="list-decimal list-inside space-y-1 text-muted-foreground">
+            <li>Save both files to the same folder (Downloads), then double-click the <span className="font-mono">.bat</span> file</li>
+            <li>Each time: MAPIR Wi‑Fi + USB internet</li>
+            <li>Green status below → <span className="font-medium text-foreground">Detect camera</span></li>
+          </ol>
+        )}
       </div>
 
       <div className="rounded-lg border border-border/60 bg-muted/30 px-3 py-2.5 text-xs space-y-1">
         <p className="font-medium text-foreground">Your PC</p>
-        <p className="text-muted-foreground">
-          Install once only — the bridge runs automatically after that. No scripts, no URLs.
-        </p>
         {bridgeStatus?.websocket_connected ? (
           <p className="text-green-700 dark:text-green-400">
             Your PC connected{bridgeStatus.field_hostname ? ` (${bridgeStatus.field_hostname})` : ""}
