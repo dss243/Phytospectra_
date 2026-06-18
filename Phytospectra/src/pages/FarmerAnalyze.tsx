@@ -81,11 +81,7 @@ function revokeIfBlobUrl(url: string | null | undefined) {
   if (url && url.startsWith("blob:")) URL.revokeObjectURL(url);
 }
 
-import { hasValidGps, isMapWorthyStress, toStressMapPoints } from "@/lib/gpsMap";
-import { StressFlightMap } from "@/components/StressFlightMap";
-
-// ── Types ─────────────────────────────────────────────────────────────────────
-// Driven purely by stress_class from the model — no derived "severity" logic
+// ── Stress class → display config ─────────────────────────────────────────────
 function stressDisplay(stressClass: string): {
   label: string;
   colorCard: string;
