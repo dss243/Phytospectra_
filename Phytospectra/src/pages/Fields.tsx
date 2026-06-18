@@ -7,10 +7,12 @@ import { Label } from "@/components/ui/label";
 import { useAuth } from "@/hooks/useAuth";
 import { supabase } from "@/integrations/supabase/client";
 import { Field } from "@/types/backend";
-import { Sprout, MapPin, Leaf, AlertTriangle, CheckCircle2, Pencil, Wheat } from "lucide-react";
+import { Sprout, MapPin, Leaf, AlertTriangle, CheckCircle2, Pencil, Wheat, LocateFixed } from "lucide-react";
 import { getBackendBaseUrl, backendFetch } from "@/lib/backend";
 import { MapContainer, TileLayer, FeatureGroup } from "react-leaflet";
 import { EditControl } from "react-leaflet-draw";
+import { MapSetView, requestUserMapCenter } from "@/components/MapUserLocation";
+import type { LatLngTuple } from "leaflet";
 import "leaflet/dist/leaflet.css";
 import "leaflet-draw/dist/leaflet.draw.css";
 
@@ -137,8 +139,34 @@ export default function Fields() {
   const [creating, setCreating] = useState(false);
   const [draft, setDraft] = useState<NewField>(blankNewField);
   const [step, setStep] = useState<"details" | "map">("details");
+  const [mapCenter, setMapCenter] = useState<LatLngTuple>([36.48, 2.95]);
+  const [mapZoom, setMapZoom] = useState(13);
+  const [locating, setLocating] = useState(false);
+  const [locationHint, setLocationHint] = useState<string | null>(null);
 
   const backendBaseUrl = getBackendBaseUrl();
+
+  const goToMyLocation = () => {
+    setLocating(true);
+    setLocationHint(null);
+    requestUserMapCenter(
+      (lat, lng) => {
+        setMapCenter([lat, lng]);
+        setMapZoom(16);
+        setLocating(false);
+        setLocationHint("Map centered on your location — draw your field outline.");
+      },
+      (msg) => {
+        setLocating(false);
+        setLocationHint(msg ?? "Could not get your location — allow GPS in the browser or pan the map manually.");
+      },
+    );
+  };
+
+  useEffect(() => {
+    if (step !== "map") return;
+    goToMyLocation();
+  }, [step]);
 
   // ── Load fields ──────────────────────────────────────────────────────────
   useEffect(() => {
@@ -428,31 +456,53 @@ export default function Fields() {
                 </div>
 
                 {/* Map */}
-                <div className="rounded-xl overflow-hidden border border-border h-80 shadow-inner">
-                  <MapContainer
-                    center={[36.48, 2.95]}
-                    zoom={13}
-                    style={{ height: "100%", width: "100%" }}
-                  >
-                    <TileLayer
-                      url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-                      attribution="© OpenStreetMap contributors"
-                    />
-                    <FeatureGroup>
-                      <EditControl
-                        position="topright"
-                        onCreated={onPolygonCreated}
-                        draw={{
-                          rectangle: false,
-                          circle: false,
-                          circlemarker: false,
-                          marker: false,
-                          polyline: false,
-                          polygon: true,
-                        }}
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between gap-2 flex-wrap">
+                    <p className="text-xs text-muted-foreground">
+                      Draw your farm plot — the outline appears on stress maps in Field Analytics.
+                    </p>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="h-8 text-xs gap-1.5"
+                      onClick={goToMyLocation}
+                      disabled={locating}
+                    >
+                      <LocateFixed className={`h-3.5 w-3.5 ${locating ? "animate-pulse" : ""}`} />
+                      {locating ? "Finding you…" : "My location"}
+                    </Button>
+                  </div>
+                  {locationHint && (
+                    <p className="text-xs text-muted-foreground">{locationHint}</p>
+                  )}
+                  <div className="rounded-xl overflow-hidden border border-border h-80 shadow-inner">
+                    <MapContainer
+                      center={mapCenter}
+                      zoom={mapZoom}
+                      style={{ height: "100%", width: "100%" }}
+                    >
+                      <MapSetView center={mapCenter} zoom={mapZoom} />
+                      <TileLayer
+                        url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+                        attribution="© OpenStreetMap contributors"
                       />
-                    </FeatureGroup>
-                  </MapContainer>
+                      <FeatureGroup>
+                        <EditControl
+                          position="topright"
+                          onCreated={onPolygonCreated}
+                          draw={{
+                            rectangle: false,
+                            circle: false,
+                            circlemarker: false,
+                            marker: false,
+                            polyline: false,
+                            polygon: true,
+                          }}
+                        />
+                      </FeatureGroup>
+                    </MapContainer>
+                  </div>
                 </div>
 
                 {/* Actions */}

@@ -14,6 +14,7 @@ from core.config import settings
 from core.connection_manager import manager
 from services import supabase_service
 from services.calibration import extract_gps_from_exif
+from services.gps_utils import normalize_gps
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Segmentation"])
@@ -157,9 +158,67 @@ def _payload_from_cached(image_id: str, cached: dict) -> dict:
         "stress_class":      cached.get("stress_class"),
         "health_score":      cached.get("health_score"),
         "health_percentage": cached.get("health_percentage"),
+        "confidence":        cached.get("confidence"),
+        "gps":               normalize_gps(cached.get("gps")),
         "label_counts":      {},
         "cached":            True,
     }
+
+
+async def _enrich_results_with_gps(client, rows: list[dict]) -> list[dict]:
+    """Attach GPS from segmentation row or linked image."""
+    if not rows:
+        return []
+    image_ids = [r["image_id"] for r in rows if r.get("image_id")]
+    gps_by_image: dict[str, dict] = {}
+    if image_ids:
+        try:
+            img_res = (
+                client.table("images")
+                .select("id, gps")
+                .in_("id", image_ids)
+                .execute()
+            )
+            for img in img_res.data or []:
+                g = normalize_gps(img.get("gps"))
+                if g:
+                    gps_by_image[img["id"]] = g
+        except Exception as e:
+            logger.warning("GPS image lookup failed: %s", e)
+
+    enriched: list[dict] = []
+    for row in rows:
+        gps = normalize_gps(row.get("gps")) or gps_by_image.get(row.get("image_id"))
+        enriched.append({**row, "gps": gps})
+    return enriched
+
+
+async def _flight_field_meta(client, flight_id: str, user_id: str) -> dict | None:
+    try:
+        res = (
+            client.table("flights")
+            .select("field_id, fields(field_name, boundary, latitude, longitude)")
+            .eq("id", flight_id)
+            .eq("user_id", user_id)
+            .limit(1)
+            .execute()
+        )
+        if not res.data:
+            return None
+        row = res.data[0]
+        fields = row.get("fields") or {}
+        if not isinstance(fields, dict):
+            fields = {}
+        return {
+            "field_id": row.get("field_id"),
+            "field_name": fields.get("field_name"),
+            "boundary": fields.get("boundary"),
+            "latitude": fields.get("latitude"),
+            "longitude": fields.get("longitude"),
+        }
+    except Exception as e:
+        logger.warning("Flight field meta lookup failed: %s", e)
+        return None
 
 
 # ── GPS helpers ───────────────────────────────────────────────────────────────
@@ -514,6 +573,7 @@ async def segment_flight(
     stressed_count = sum(1 for r in results if r.get("stress_class") == "stressed")
 
     if results:
+        results = await _enrich_results_with_gps(client, results)
         signed_rows = supabase_service.attach_segmentation_mask_urls([
             {"image_id": r["image_id"], "heatmap_url": r.get("mask_url"), **r}
             for r in results
@@ -548,11 +608,14 @@ async def get_flight_segmentations(
         user_id=user_id,
         limit=500,
     )
+    rows = await _enrich_results_with_gps(client, rows)
+    field_meta = await _flight_field_meta(client, flight_id, user_id)
 
     logger.info("GET segment/flight/%s: %d cached results", flight_id, len(rows))
     return {
         "flight_id": flight_id,
         "count":     len(rows),
+        "field":     field_meta,
         "results": [
             {
                 "image_id":             r["image_id"],
@@ -563,6 +626,7 @@ async def get_flight_segmentations(
                 "healthy_pixel_count":  r.get("healthy_pixel_count"),
                 "stressed_pixel_count": r.get("stressed_pixel_count"),
                 "confidence":           r.get("confidence"),
+                "gps":                  r.get("gps"),
                 "processed_at":         r.get("processed_at"),
             }
             for r in rows

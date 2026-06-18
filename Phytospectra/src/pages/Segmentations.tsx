@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useMemo } from "react";
 import { PageHeader } from "@/components/PageHeader";
 import { Layers3, Loader2 } from "lucide-react";
 import { Card } from "@/components/ui/card";
@@ -8,13 +8,24 @@ import { useAuth } from "@/hooks/useAuth";
 import { supabase } from "@/integrations/supabase/client";
 import { getBackendBaseUrl, backendFetch, backendHeaders } from "@/lib/backend";
 import { resolveMaskUrls, type MaskResult } from "@/lib/maskUrls";
+import { StressZoneMapSection } from "@/components/StressZoneMapSection";
+import { mergeSegmentRowsForMap, toStressMapPoints } from "@/lib/gpsMap";
 
 type DisplayRow = MaskResult & {
   previewUrl: string | null;
 };
 
+type FieldMeta = {
+  field_id?: string | null;
+  field_name?: string | null;
+  boundary?: Record<string, unknown> | null;
+  latitude?: number | null;
+  longitude?: number | null;
+};
+
 type PassedState = {
   segResults?: MaskResult[];
+  field?: FieldMeta | null;
 };
 
 function getTokenFromSession() {
@@ -31,21 +42,41 @@ function formatConfidence(confidence: number | null | undefined): string {
   return `${pct}%`;
 }
 
+function parseSegmentResponse(json: Record<string, unknown>): {
+  results: MaskResult[];
+  field: FieldMeta | null;
+} {
+  const results = ((json.results as MaskResult[]) ?? []).map((r) => ({
+    image_id: r.image_id,
+    mask_url: r.mask_url ?? r.heatmap_url ?? null,
+    heatmap_url: r.heatmap_url ?? r.mask_url ?? null,
+    stress_class: r.stress_class ?? null,
+    confidence: r.confidence ?? null,
+    health_score: r.health_score ?? null,
+    gps: r.gps ?? null,
+  }));
+  const field = (json.field as FieldMeta | null | undefined) ?? null;
+  return { results, field };
+}
+
 export default function Segmentations() {
   const { user, loading: authLoading } = useAuth();
   const { flight_id } = useParams();
   const location = useLocation();
-  const passed = (location.state as PassedState | null)?.segResults;
+  const passed = location.state as PassedState | null;
   const backendBaseUrl = getBackendBaseUrl();
 
   const [items, setItems] = useState<DisplayRow[]>([]);
+  const [fieldMeta, setFieldMeta] = useState<FieldMeta | null>(passed?.field ?? null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const applyResults = useCallback(async (results: MaskResult[]) => {
+  const applyResults = useCallback(async (results: MaskResult[], field?: FieldMeta | null) => {
     const signed = await resolveMaskUrls(results);
     setItems(signed);
+    if (field) setFieldMeta(field);
   }, []);
 
   const loadResults = useCallback(async (runIfEmpty = false) => {
@@ -60,7 +91,7 @@ export default function Segmentations() {
       if (!res.ok) throw new Error(await res.text());
 
       let json = await res.json();
-      let results: MaskResult[] = json.results ?? [];
+      let { results, field } = parseSegmentResponse(json);
 
       if (results.length === 0 && runIfEmpty) {
         setRunning(true);
@@ -70,10 +101,19 @@ export default function Segmentations() {
         });
         if (!res.ok) throw new Error(await res.text());
         json = await res.json();
-        results = json.results ?? [];
+        ({ results, field } = parseSegmentResponse(json));
       }
 
-      await applyResults(results);
+      let flightImages: { id: string; gps?: unknown }[] = [];
+      try {
+        const imgRes = await backendFetch(`/api/flights/${flight_id}/images`, { headers });
+        if (imgRes.ok) flightImages = await imgRes.json();
+      } catch {
+        /* optional */
+      }
+
+      const merged = mergeSegmentRowsForMap(results, flightImages);
+      await applyResults(merged, field);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load segmentations");
     } finally {
@@ -85,8 +125,23 @@ export default function Segmentations() {
   useEffect(() => {
     if (authLoading || !user) return;
 
-    if (passed?.length) {
-      void applyResults(passed);
+    if (passed?.segResults?.length) {
+      void (async () => {
+        let flightImages: { id: string; gps?: unknown }[] = [];
+        if (flight_id) {
+          try {
+            const token = await getTokenFromSession();
+            const imgRes = await backendFetch(`/api/flights/${flight_id}/images`, {
+              headers: backendHeaders({ Authorization: `Bearer ${token}` }),
+            });
+            if (imgRes.ok) flightImages = await imgRes.json();
+          } catch {
+            /* optional */
+          }
+        }
+        const merged = mergeSegmentRowsForMap(passed.segResults!, flightImages);
+        await applyResults(merged, passed.field ?? null);
+      })();
       return;
     }
 
@@ -95,6 +150,7 @@ export default function Segmentations() {
 
   const runSegmentation = () => loadResults(true);
 
+  const mapPoints = useMemo(() => toStressMapPoints(items), [items]);
   const busy = pending || running;
 
   return (
@@ -111,6 +167,21 @@ export default function Segmentations() {
           {error}
         </div>
       ) : null}
+
+      {items.length > 0 && (
+        <StressZoneMapSection
+          points={mapPoints}
+          boundary={fieldMeta?.boundary ?? null}
+          center={{
+            lat: fieldMeta?.latitude ?? mapPoints[0]?.lat,
+            lng: fieldMeta?.longitude ?? mapPoints[0]?.lng,
+          }}
+          fieldName={fieldMeta?.field_name}
+          selectedId={selectedId}
+          onSelect={(p) => setSelectedId(p.image_id)}
+          emptyHint="Field map shown — no stressed pins with GPS. Check images have EXIF GPS or set field location in Fields."
+        />
+      )}
 
       <div className="flex items-center justify-between gap-3 flex-wrap">
         <div className="text-sm text-muted-foreground flex items-center gap-2">
@@ -138,7 +209,13 @@ export default function Segmentations() {
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         {items.map((s) => (
-          <Card key={s.image_id} className="p-5 space-y-3">
+          <Card
+            key={s.image_id}
+            className={`p-5 space-y-3 cursor-pointer transition-colors ${
+              selectedId === s.image_id ? "ring-2 ring-primary border-primary/40" : ""
+            }`}
+            onClick={() => setSelectedId(s.image_id)}
+          >
             <div className="flex items-start justify-between gap-3">
               <div>
                 <div className="font-semibold text-sm">Image · {s.image_id.slice(-8)}</div>
@@ -155,6 +232,12 @@ export default function Segmentations() {
               Health score:{" "}
               {s.health_score != null ? `${Math.round(s.health_score * 10) / 10}/100` : "—"}
             </div>
+
+            {s.gps && (
+              <div className="text-[11px] text-muted-foreground font-mono">
+                GPS: {s.gps.lat.toFixed(6)}, {s.gps.lng.toFixed(6)}
+              </div>
+            )}
 
             {s.previewUrl ? (
               <img

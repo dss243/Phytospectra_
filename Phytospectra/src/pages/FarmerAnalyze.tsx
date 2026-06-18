@@ -10,10 +10,9 @@ import {
   AlertTriangle, Image as ImageIcon, UploadCloud, MapPin,
   Camera, Wifi, WifiOff, Plug, PlugZap, RefreshCw,
   FolderOpen, Play, Battery, HardDrive, Loader2,
-  CheckCircle2, XCircle, Download,
+  CheckCircle2, XCircle,
 } from "lucide-react";
-import { backendFetch, backendHeaders, getBackendBaseUrl, probeBackendReachable } from "@/lib/backend";
-import { downloadCameraSetupInstaller } from "@/lib/cameraSetupDownload";
+import { backendFetch, backendHeaders, probeBackendReachable } from "@/lib/backend";
 import { saveFieldsCache, loadFieldsCache } from "@/lib/fieldsCache";
 import { analyzeRunHttp, analyzeFromUploadViaWebSocket, blobToBase64 } from "@/lib/analyze";
 import {
@@ -25,17 +24,17 @@ import {
 import {
   CAMERA_HOST,
   CAMERA_PHOTO_DIR,
+  cameraPhotoUrl,
   downloadCameraPhoto,
   fetchCameraFileList,
   fetchCameraParams,
   setCameraAuthToken,
   probeCameraViaProxy,
   triggerCameraCapture,
-  cameraPhotoBlobUrl,
-  getFieldBridgeStatus,
-  type FieldBridgeStatus,
 } from "@/lib/camera";
 import { Field } from "@/types/backend";
+import { hasValidGps, isMapWorthyStress, toStressMapPoints } from "@/lib/gpsMap";
+import { StressFlightMap } from "@/components/StressFlightMap";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -79,7 +78,10 @@ function revokeIfBlobUrl(url: string | null | undefined) {
   if (url && url.startsWith("blob:")) URL.revokeObjectURL(url);
 }
 
-// ── Stress class → display config ─────────────────────────────────────────────
+import { hasValidGps, isMapWorthyStress, toStressMapPoints } from "@/lib/gpsMap";
+import { StressFlightMap } from "@/components/StressFlightMap";
+
+// ── Types ─────────────────────────────────────────────────────────────────────
 // Driven purely by stress_class from the model — no derived "severity" logic
 function stressDisplay(stressClass: string): {
   label: string;
@@ -121,12 +123,9 @@ function CameraPanel({ selectedFieldId, analyzing, onAnalyzeCamera, onError }: C
   const [files, setFiles] = useState<string[]>([]);
   const [selFile, setSelFile] = useState<string | null>(null);
   const [preview, setPreview] = useState<string | null>(null);
-  const [thumbs, setThumbs] = useState<Record<string, string>>({});
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [loadingF, setLoadingF] = useState(false);
   const [working, setWorking] = useState(false);
-  const [lastError, setLastError] = useState<string | null>(null);
-  const [bridgeStatus, setBridgeStatus] = useState<FieldBridgeStatus | null>(null);
   const logRef = useRef<HTMLDivElement>(null);
 
   const connected = conn === "connected";
@@ -140,71 +139,13 @@ function CameraPanel({ selectedFieldId, analyzing, onAnalyzeCamera, onError }: C
     if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
   }, [logs]);
 
-  useEffect(() => {
-    void getToken()
-      .then(async (token) => {
-        setCameraAuthToken(token);
-        const st = await getFieldBridgeStatus();
-        if (st) setBridgeStatus(st);
-      })
-      .catch(() => setCameraAuthToken(null));
-    const poll = window.setInterval(async () => {
-      const st = await getFieldBridgeStatus();
-      if (st) setBridgeStatus(st);
-    }, 8000);
-    return () => window.clearInterval(poll);
-  }, []);
-
-  useEffect(() => {
-    if (mock || files.length === 0) return;
-    let cancelled = false;
-    void (async () => {
-      const next: Record<string, string> = {};
-      for (const fn of files.slice(0, 30)) {
-        try {
-          next[fn] = await cameraPhotoBlobUrl(fn);
-        } catch {
-          /* skip broken thumb */
-        }
-        if (cancelled) return;
-      }
-      if (!cancelled) {
-        setThumbs((prev) => {
-          Object.values(prev).forEach((u) => URL.revokeObjectURL(u));
-          return next;
-        });
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [files, mock]);
+  useEffect(() => { return () => { revokeIfBlobUrl(preview); }; }, [preview]);
 
   async function detectCamera() {
     setConn("connecting");
     setMock(false);
-    setLastError(null);
-    addLog(`Checking camera (via backend → ${CAMERA_HOST})…`);
+    addLog(`Checking camera at ${CAMERA_HOST}…`);
     try {
-      const { data: sess } = await supabase.auth.getSession();
-      let token = sess.session?.access_token;
-      if (!token) {
-        const { data: refreshed } = await supabase.auth.refreshSession();
-        token = refreshed.session?.access_token;
-      }
-      if (!token) {
-        throw new Error("Not logged in — open phytospectra.vercel.app, sign in, then try again.");
-      }
-      setCameraAuthToken(token);
-
-      const backendOk = await probeBackendReachable();
-      if (!backendOk) {
-        throw new Error(
-          "Cannot reach the PC backend (ngrok). On the phone: use mobile data or home Wi‑Fi — not MAPIR Wi‑Fi. " +
-          `Test in the phone browser: ${getBackendBaseUrl()}/api/health`,
-        );
-      }
-
       const probe = await probeCameraViaProxy();
       if (!probe.ok) throw new Error(probe.error ?? "timeout");
       setConn("connected");
@@ -223,13 +164,11 @@ function CameraPanel({ selectedFieldId, analyzing, onAnalyzeCamera, onError }: C
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       setConn("error"); setMock(false); setStatus({}); setFiles([]);
-      setLastError(msg);
       addLog(`Camera not reachable (${msg}).`, "err");
     }
   }
 
   function enableDemoMode() {
-    setLastError(null);
     setMock(true); setConn("connected");
     setStatus({ battery: "82%", gps: "Fixed · 6 sats", storage: "14.2 GB free", count: 124 });
     setFiles(MOCK_FILES);
@@ -238,7 +177,7 @@ function CameraPanel({ selectedFieldId, analyzing, onAnalyzeCamera, onError }: C
 
   function clearCameraSession() {
     setConn("idle"); setMock(false); setStatus({}); setFiles([]);
-    setSelFile(null); setPreview(null); setLastError(null);
+    setSelFile(null); setPreview(null);
     addLog("Camera session cleared.");
   }
 
@@ -278,11 +217,10 @@ function CameraPanel({ selectedFieldId, analyzing, onAnalyzeCamera, onError }: C
     addLog(`Saving ${fn} from camera…`);
     try {
       revokeIfBlobUrl(preview);
-      const blob = await downloadCameraPhoto(fn);
-      const previewUrl = URL.createObjectURL(blob);
-      setPreview(previewUrl);
+      const previewUrl = cameraPhotoUrl(fn);
       await onAnalyzeCamera(fn, previewUrl);
-      addLog(`${fn} saved on this device.`, "ok");
+      setPreview(previewUrl);
+      addLog(`${fn} saved — switch to internet Wi‑Fi to analyze.`, "ok");
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       addLog(`Failed: ${msg}`, "err");
@@ -340,69 +278,26 @@ function CameraPanel({ selectedFieldId, analyzing, onAnalyzeCamera, onError }: C
         </span>
       </div>
 
-      <div className="rounded-lg border border-primary/20 bg-primary/5 px-3 py-2.5 text-xs space-y-3">
-        <p className="font-medium text-foreground">First time on this PC?</p>
-        <p className="text-muted-foreground">
-          Click the button below once. Windows may ask &quot;Run anyway&quot; — choose Run. After that you never install again.
-        </p>
-        <Button
-          type="button"
-          size="sm"
-          className="gap-2 w-full sm:w-auto"
-          onClick={() => downloadCameraSetupInstaller()}
-          disabled={!!bridgeStatus?.websocket_connected}
-        >
-          <Download className="h-4 w-4" />
-          Set up this PC (one time)
-        </Button>
-        {bridgeStatus?.websocket_connected ? (
-          <p className="text-green-700 dark:text-green-400 text-[11px]">
-            Already set up on this PC — you can use Detect camera below.
-          </p>
-        ) : (
-          <ol className="list-decimal list-inside space-y-1 text-muted-foreground">
-            <li>Save both files to the same folder (Downloads), then double-click the <span className="font-mono">.bat</span> file</li>
-            <li>Each time: MAPIR Wi‑Fi + USB internet</li>
-            <li>Green status below → <span className="font-medium text-foreground">Detect camera</span></li>
-          </ol>
-        )}
-      </div>
-
-      <div className="rounded-lg border border-border/60 bg-muted/30 px-3 py-2.5 text-xs space-y-1">
-        <p className="font-medium text-foreground">Your PC</p>
-        {bridgeStatus?.websocket_connected ? (
-          <p className="text-green-700 dark:text-green-400">
-            Your PC connected{bridgeStatus.field_hostname ? ` (${bridgeStatus.field_hostname})` : ""}
-          </p>
-        ) : (
-          <p className="text-amber-700 dark:text-amber-400">Waiting for your PC… (MAPIR Wi‑Fi + USB internet)</p>
-        )}
+      <div className="rounded-lg border border-primary/20 bg-primary/5 px-3 py-2.5 text-xs space-y-2">
+        <p className="font-medium text-foreground">Two-step workflow on PC (one Wi‑Fi at a time)</p>
+        <ol className="list-decimal list-inside space-y-1 text-muted-foreground">
+          <li>
+            <span className="font-medium text-foreground">Step 1 — MAPIR Wi‑Fi:</span> detect camera, then tap a photo — it saves automatically
+          </li>
+          <li>
+            <span className="font-medium text-foreground">Step 2 — Internet Wi‑Fi:</span> switch network, reopen the app, click{" "}
+            <span className="font-medium text-foreground">Analyze saved photo</span> in the yellow box
+          </li>
+        </ol>
       </div>
 
       {conn === "error" && (
         <div className="rounded-lg border border-red-200 bg-red-50 dark:bg-red-900/20 px-3 py-2 text-xs space-y-2">
           <p className="flex items-start gap-1.5 text-red-700 dark:text-red-300">
             <AlertTriangle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
-            {lastError ?? "Camera detect failed."}
+            Camera not found. Join the MAPIR hotspot in Windows Wi‑Fi first.
           </p>
-          <p className="text-muted-foreground">
-            Phone must use <span className="font-medium text-foreground">mobile data or home Wi‑Fi</span> (not MAPIR).
-            PC stays on MAPIR + USB tethering for ngrok.
-          </p>
-          <p className="text-muted-foreground break-all">
-            Backend test:{" "}
-            <a
-              href={`${getBackendBaseUrl()}/api/health`}
-              target="_blank"
-              rel="noreferrer"
-              className="text-primary underline"
-            >
-              {getBackendBaseUrl()}/api/health
-            </a>
-          </p>
-          <Button size="sm" variant="outline" onClick={enableDemoMode} className="h-7 text-xs">
-            Use demo mode (fake camera files — use Manual Upload below for real AI)
-          </Button>
+          <Button size="sm" variant="outline" onClick={enableDemoMode} className="h-7 text-xs">Use demo mode</Button>
         </div>
       )}
 
@@ -480,7 +375,7 @@ function CameraPanel({ selectedFieldId, analyzing, onAnalyzeCamera, onError }: C
             : (
               <div className="grid grid-cols-3 gap-1.5">
                 {files.map(fn => {
-                  const thumbUrl = mock ? null : thumbs[fn] ?? null;
+                  const thumbUrl = mock ? null : cameraPhotoUrl(fn);
                   const isSaving = gridBusy && selFile === fn;
                   return (
                     <div
@@ -786,7 +681,7 @@ export default function FarmerAnalyze() {
     <div className="space-y-4">
       <PageHeader
         title="Drone Image Analysis"
-        subtitle="Vercel app + ngrok backend bridges MAPIR hotspot on your PC"
+        subtitle="Connect to MAPIR Wi‑Fi to save photos, then switch to internet to analyze"
         gradient="gradient-analytics"
       >
         <div className="flex items-center gap-2 text-xs text-muted-foreground">
@@ -949,11 +844,32 @@ export default function FarmerAnalyze() {
                   </div>
                 </div>
 
-                {/* ── GPS ── */}
-                {result.gps && (
-                  <div className="text-xs text-muted-foreground flex items-center gap-1">
-                    <MapPin className="h-3 w-3" />
-                    GPS: {result.gps.lat.toFixed(6)}, {result.gps.lng.toFixed(6)}
+                {hasValidGps(result.gps) && isMapWorthyStress(result.health_score, result.stress_class) && (
+                  <div className="space-y-2">
+                    <h4 className="text-sm font-medium flex items-center gap-1.5">
+                      <MapPin className="h-4 w-4 text-primary" />
+                      Stress zone on map
+                    </h4>
+                    <div className="h-[300px] w-full">
+                      <StressFlightMap
+                        points={toStressMapPoints([
+                          {
+                            image_id: result.zone_id || "analysis",
+                            gps: result.gps,
+                            health_score: result.health_score,
+                            stress_class: result.stress_class,
+                          },
+                        ])}
+                        boundary={selectedField?.boundary ?? null}
+                        center={{
+                          lat: selectedField?.latitude ?? result.gps.lat,
+                          lng: selectedField?.longitude ?? result.gps.lng,
+                        }}
+                      />
+                    </div>
+                    <p className="text-[11px] text-muted-foreground font-mono">
+                      {result.gps.lat.toFixed(6)}, {result.gps.lng.toFixed(6)}
+                    </p>
                   </div>
                 )}
 

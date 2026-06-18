@@ -7,6 +7,7 @@ export type MaskResult = {
   stress_class?: string | null;
   confidence?: number | null;
   health_score?: number | null;
+  gps?: { lat: number; lng: number } | null;
 };
 
 function rawMaskUrl(r: MaskResult): string | null {

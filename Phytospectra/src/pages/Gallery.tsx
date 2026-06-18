@@ -1,6 +1,8 @@
-import { useState, useEffect, useLayoutEffect, useCallback, useRef, type CSSProperties } from "react";
+import { useState, useEffect, useLayoutEffect, useCallback, useRef, useMemo, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
 import { resolveMaskUrls } from "@/lib/maskUrls";
+import { StressZoneMapSection } from "@/components/StressZoneMapSection";
+import { mergeSegmentRowsForMap, toStressMapPoints } from "@/lib/gpsMap";
 import { PageHeader } from "@/components/PageHeader";
 import { supabase } from "@/integrations/supabase/client";
 import { getBackendBaseUrl, backendFetch, backendHeaders } from "@/lib/backend";
@@ -32,7 +34,9 @@ type SegResult = {
   image_id: string;
   mask_url: string;
   stress_class?: string;
-  confidence?: number;   // percentage 0.0–100.0, e.g. 87.5
+  confidence?: number;
+  health_score?: number;
+  gps?: { lat: number; lng: number } | null;
   cached?: boolean;
 };
 
@@ -554,6 +558,7 @@ type MasksModalData = {
   label: string;
   images: ImageRow[];
   results: SegResult[];
+  field?: Field | null;
 };
 
 function FlightMasksModal({
@@ -567,6 +572,21 @@ function FlightMasksModal({
     (SegResult & { previewUrl: string | null; fileLabel?: string })[]
   >([]);
   const [signing, setSigning] = useState(true);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+
+  const mapPoints = useMemo(() => {
+    const merged = mergeSegmentRowsForMap(
+      data.results.map((r) => ({
+        image_id: r.image_id,
+        gps: r.gps,
+        health_score: r.health_score,
+        stress_class: r.stress_class,
+        mask_url: r.mask_url,
+      })),
+      data.images.map((i) => ({ id: i.id, gps: i.gps })),
+    );
+    return toStressMapPoints(merged);
+  }, [data]);
 
   useLayoutEffect(() => {
     const main = document.querySelector("main");
@@ -628,7 +648,22 @@ function FlightMasksModal({
           </button>
         </div>
 
-        <div className="p-4 overflow-y-auto flex-1">
+        <div className="p-4 overflow-y-auto flex-1 space-y-4">
+          {!signing && previews.length > 0 && (
+            <StressZoneMapSection
+              points={mapPoints}
+              boundary={data.field?.boundary ?? null}
+              center={{
+                lat: data.field?.latitude ?? mapPoints[0]?.lat,
+                lng: data.field?.longitude ?? mapPoints[0]?.lng,
+              }}
+              fieldName={data.field?.field_name}
+              selectedId={selectedId}
+              onSelect={(p) => setSelectedId(p.image_id)}
+              emptyHint="Map shows your field — orange/red pins appear only for moderate & severe stress with GPS."
+            />
+          )}
+
           {signing ? (
             <div className="flex items-center justify-center gap-2 py-16 text-sm text-muted-foreground">
               <Loader2 className="h-5 w-5 animate-spin" />
@@ -643,7 +678,10 @@ function FlightMasksModal({
               {previews.map((s) => (
                 <div
                   key={s.image_id}
-                  className="rounded-xl border border-border/40 overflow-hidden bg-muted/20"
+                  className={`rounded-xl border overflow-hidden bg-muted/20 cursor-pointer transition-colors ${
+                    selectedId === s.image_id ? "border-primary ring-2 ring-primary/30" : "border-border/40"
+                  }`}
+                  onClick={() => setSelectedId(s.image_id)}
                 >
                   {s.previewUrl ? (
                     <img
@@ -743,12 +781,14 @@ export default function Gallery() {
               const res  = await backendFetch(`/api/segment/flight/${fl.id}`, { headers });
               if (!res.ok) return;
               const json = await res.json();
-              const results: SegResult[] = (json.results ?? []).map((r: any) => ({
-                image_id:    r.image_id,
-                mask_url:    r.mask_url ?? "",
+              const results: SegResult[] = (json.results ?? []).map((r: SegResult & { heatmap_url?: string }) => ({
+                image_id:     r.image_id,
+                mask_url:     r.mask_url ?? "",
                 stress_class: r.stress_class ?? undefined,
-                confidence:  r.confidence ?? undefined,
-                cached:      true,
+                confidence:   r.confidence ?? undefined,
+                health_score: r.health_score ?? undefined,
+                gps:          r.gps ?? undefined,
+                cached:       true,
               }));
               const valid = results.filter(
                 (r) => r.mask_url && !r.mask_url.startsWith("local://")
@@ -789,12 +829,14 @@ export default function Gallery() {
         throw new Error(msg || `HTTP ${res.status}`);
       }
       const json = await res.json();
-      const results: SegResult[] = (json.results ?? []).map((r: any) => ({
-        image_id:    r.image_id,
-        mask_url:    r.mask_url ?? "",
+      const results: SegResult[] = (json.results ?? []).map((r: SegResult & { heatmap_url?: string }) => ({
+        image_id:     r.image_id,
+        mask_url:     r.mask_url ?? "",
         stress_class: r.stress_class ?? undefined,
-        confidence:  r.confidence ?? undefined,
-        cached:      r.cached ?? false,
+        confidence:   r.confidence ?? undefined,
+        health_score: r.health_score ?? undefined,
+        gps:          r.gps ?? undefined,
+        cached:       r.cached ?? false,
       }));
       setSegStates((prev) => ({
         ...prev,
@@ -856,6 +898,7 @@ export default function Gallery() {
       label: `${field?.field_name ?? "Field"} · Flight · ${flightDate}`,
       images: images.filter((i) => i.flight_id === flightId),
       results: seg.results,
+      field: field ?? null,
     });
   }, [flights, segStates, fields, images]);
 

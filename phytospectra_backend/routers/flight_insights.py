@@ -152,6 +152,89 @@ async def get_field_analytics(user_id: str, field_id: str, limit_flights: int = 
     return {"trends": trends, "stress_by_flight": stress_by_flight, "summary": summary}
 
 
+async def get_field_stress_map_data(user_id: str, field_id: str) -> dict | None:
+    """Latest SegFormer/ViT point per image for a field — for Field Analytics map."""
+    client = supabase_service.get_supabase()
+    if not client:
+        return None
+
+    field_res = (
+        client.table("fields")
+        .select("id, field_name, latitude, longitude, boundary")
+        .eq("id", field_id)
+        .eq("user_id", user_id)
+        .limit(1)
+        .execute()
+    )
+    if not field_res.data:
+        return None
+
+    field = field_res.data[0]
+    segs = await supabase_service.get_segmentations(
+        user_id=user_id, field_id=field_id, limit=2000,
+    )
+    by_image = _latest_segmentation_per_image(segs)
+    image_ids = list(by_image.keys())
+
+    gps_by_image: dict[str, dict] = {}
+    if image_ids:
+        try:
+            img_res = (
+                client.table("images")
+                .select("id, gps")
+                .in_("id", image_ids)
+                .execute()
+            )
+            for img in img_res.data or []:
+                g = normalize_gps(img.get("gps"))
+                if g:
+                    gps_by_image[img["id"]] = g
+        except Exception as e:
+            logger.warning("stress-map image GPS lookup failed: %s", e)
+
+    field_gps = normalize_gps(
+        {"lat": field.get("latitude"), "lng": field.get("longitude")},
+    )
+
+    points: list[dict] = []
+    for image_id, seg in by_image.items():
+        img = seg.get("images") if isinstance(seg.get("images"), dict) else {}
+        gps = None
+        gps_source = "missing"
+        seg_gps = normalize_gps(seg.get("gps"))
+        img_gps = gps_by_image.get(image_id) or normalize_gps(img.get("gps"))
+        if seg_gps:
+            gps = seg_gps
+            gps_source = "segmentation"
+        elif img_gps:
+            gps = img_gps
+            gps_source = "image"
+        points.append({
+            "image_id": image_id,
+            "lat": gps["lat"] if gps else None,
+            "lng": gps["lng"] if gps else None,
+            "gps_source": gps_source,
+            "health_score": seg.get("health_score"),
+            "stress_class": seg.get("stress_class"),
+            "confidence": seg.get("confidence"),
+            "flight_id": seg.get("flight_id"),
+            "model": _model_source(seg),
+        })
+
+    return {
+        "field": {
+            "id": field["id"],
+            "field_name": field.get("field_name"),
+            "latitude": field.get("latitude"),
+            "longitude": field.get("longitude"),
+            "boundary": field.get("boundary"),
+        },
+        "field_gps": field_gps,
+        "points": points,
+        "count": len(points),
+    }
+
+
 async def verify_flight_gps(flight_id: str, user_id: str) -> dict:
     client = supabase_service.get_supabase()
     if not client:

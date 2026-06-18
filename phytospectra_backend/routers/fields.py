@@ -3,6 +3,7 @@ from pydantic import BaseModel
 from typing import Optional
 from core.auth import get_current_user
 from services import supabase_service
+from routers.flight_insights import get_field_stress_map_data
 
 router = APIRouter(tags=["Fields"])
 
@@ -55,6 +56,15 @@ async def get_field(field_id: str, user=Depends(get_current_user)):
         raise HTTPException(status_code=404, detail="Field not found")
 
     return result.data[0]
+
+
+@router.get("/fields/{field_id}/stress-map")
+async def field_stress_map(field_id: str, user=Depends(get_current_user)):
+    """GPS stress pins for Field Analytics map (SegFormer + ViT segmentations)."""
+    data = await get_field_stress_map_data(user["sub"], field_id)
+    if data is None:
+        raise HTTPException(status_code=404, detail="Field not found")
+    return data
 
 
 @router.delete("/fields/{field_id}")

@@ -11,6 +11,7 @@ export type StressMapPoint = {
   heatmap_url?: string | null;
   model?: string;
   storage_path?: string | null;
+  gps_source?: string | null;
 };
 
 function healthColor(score: number | null | undefined): string {
@@ -30,7 +31,15 @@ function Resize() {
   return null;
 }
 
-function FitBounds({ points, boundary }: { points: StressMapPoint[]; boundary?: object | null }) {
+function FitBounds({
+  points,
+  boundary,
+  center,
+}: {
+  points: StressMapPoint[];
+  boundary?: object | null;
+  center?: { lat?: number | null; lng?: number | null };
+}) {
   const map = useMap();
   useEffect(() => {
     const coords: LatLngTuple[] = points.map((p) => [p.lat, p.lng]);
@@ -40,8 +49,12 @@ function FitBounds({ points, boundary }: { points: StressMapPoint[]; boundary?: 
     }
     if (coords.length) {
       map.fitBounds(coords, { padding: [40, 40], maxZoom: 17 });
+      return;
     }
-  }, [map, points, boundary]);
+    if (center?.lat != null && center?.lng != null) {
+      map.setView([center.lat, center.lng], 15);
+    }
+  }, [map, points, boundary, center]);
   return null;
 }
 
@@ -84,7 +97,7 @@ export function StressFlightMap({
     <div className="relative h-full w-full rounded-2xl overflow-hidden shadow-card border border-border/40">
       <MapContainer center={defaultCenter} zoom={15} className="h-full w-full" zoomControl={false}>
         <Resize />
-        <FitBounds points={points} boundary={boundary} />
+        <FitBounds points={points} boundary={boundary} center={center} />
         <TileLayer
           url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
           attribution="Tiles © Esri"
@@ -113,7 +126,13 @@ export function StressFlightMap({
               eventHandlers={{ click: () => onSelect?.(p) }}
             >
               <Tooltip sticky>
+                {p.stress_class
+                  ? `${p.stress_class.replace(/_/g, " ")} · `
+                  : ""}
                 Health {p.health_score != null ? Math.round(p.health_score) : "—"}/100
+                <br />
+                {p.lat.toFixed(6)}, {p.lng.toFixed(6)}
+                {p.gps_source ? ` · ${p.gps_source}` : ""}
                 {p.model ? ` · ${p.model}` : ""}
               </Tooltip>
             </CircleMarker>
@@ -121,10 +140,8 @@ export function StressFlightMap({
         })}
       </MapContainer>
       <div className="absolute bottom-3 right-3 z-[400] bg-white/95 backdrop-blur rounded-xl shadow-card p-3 text-xs space-y-1.5">
-        <div className="font-semibold mb-1">Stress map (GPS)</div>
+        <div className="font-semibold mb-1">Stress zones</div>
         {[
-          { c: healthColor(80), l: "Healthy (75+)" },
-          { c: healthColor(65), l: "Mild (55–74)" },
           { c: healthColor(45), l: "Moderate (35–54)" },
           { c: healthColor(20), l: "Severe (under 35)" },
         ].map((i) => (

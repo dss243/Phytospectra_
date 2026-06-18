@@ -36,8 +36,8 @@ const uint16_t BACKEND_PORT = 443;
 #else
 // PC running: uvicorn main:app --host 0.0.0.0 --port 8000
 // Set this to YOUR PC's IP on HOME_SSID (ipconfig) — NOT localhost, NOT ESP32 IP
-const char* BACKEND_URL     = "http://172.16.179.238:8000";
-const char* BACKEND_HOST    = "172.16.179.238";
+const char* BACKEND_URL     = "http://192.168.142.234:8000";
+const char* BACKEND_HOST    = "192.168.142.234";
 const uint16_t BACKEND_PORT = 8000;
 #endif
 
@@ -88,6 +88,7 @@ const char* contentTypeForName(const char* fname) {
   if (n >= 4) {
     const char* ext = fname + n - 4;
     if (strcasecmp(ext, ".tif") == 0) return "image/tiff";
+    if (strcasecmp(ext, ".png") == 0) return "image/png";
   }
   if (n >= 5) {
     const char* ext = fname + n - 5;
@@ -235,7 +236,8 @@ bool isImageFile(String fname) {
   String upper = fname;
   upper.toUpperCase();
   return upper.endsWith(".JPG") || upper.endsWith(".JPEG")
-      || upper.endsWith(".TIF") || upper.endsWith(".TIFF");
+      || upper.endsWith(".TIF") || upper.endsWith(".TIFF")
+      || upper.endsWith(".PNG");
 }
 
 bool onNetwork(const char* ssid) {
@@ -436,7 +438,7 @@ String getAllImages() {
   }
 
   if (result.length() == 0) {
-    Serial.println("No JPG/TIF on camera — take a photo first.");
+    Serial.println("No JPG/TIF/PNG on camera — take a photo first.");
   }
   return result;
 }
