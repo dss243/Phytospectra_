@@ -30,6 +30,13 @@ function usesViteCameraProxy() {
   return import.meta.env.DEV;
 }
 
+/** HTTPS app (Vercel) cannot fetch http://192.168.1.254 — must use backend bridge. */
+function needsBridgeForCamera(): boolean {
+  if (usesViteCameraProxy()) return false;
+  if (typeof window === "undefined") return true;
+  return window.location.protocol === "https:";
+}
+
 function cameraPath(path: string, query = ""): string {
   const p = path.startsWith("/") ? path : `/${path}`;
   const q = query ? (query.startsWith("?") ? query : `?${query}`) : "";
@@ -208,19 +215,32 @@ async function probeBridgedCamera(timeoutMs: number): Promise<{ ok: boolean; pat
   }
 }
 
-/** Probe camera — direct MAPIR first (original), then cloud bridge if needed. */
+/** Probe camera — bridge first on HTTPS (Vercel), direct first on local dev. */
 export async function probeCameraViaProxy(
   timeoutMs = 8000,
 ): Promise<{ ok: boolean; path?: string; error?: string; mode?: "direct" | "bridge" }> {
-  const direct = await probeDirectCamera(timeoutMs);
-  if (direct.ok) {
-    return { ...direct, mode: "direct" };
+  const bridged = async () => probeBridgedCamera(Math.max(timeoutMs, 20000));
+  const direct = async () => probeDirectCamera(timeoutMs);
+
+  if (needsBridgeForCamera()) {
+    const b = await bridged();
+    if (b.ok) return { ...b, mode: "bridge" };
+    const d = await direct();
+    if (d.ok) return { ...d, mode: "direct" };
+    return {
+      ok: false,
+      error:
+        (b.error ? `${b.error} ` : "") +
+        "On phytospectra.vercel.app the PC must run the camera bridge: " +
+        "MAPIR Wi‑Fi + USB internet, uvicorn, ngrok, then click Set up this PC once.",
+    };
   }
 
-  const bridged = await probeBridgedCamera(Math.max(timeoutMs, 20000));
-  if (bridged.ok) {
-    return { ...bridged, mode: "bridge" };
-  }
+  const d = await direct();
+  if (d.ok) return { ...d, mode: "direct" };
+
+  const b = await bridged();
+  if (b.ok) return { ...b, mode: "bridge" };
 
   return {
     ok: false,

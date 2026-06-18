@@ -10,9 +10,10 @@ import {
   AlertTriangle, Image as ImageIcon, UploadCloud, MapPin,
   Camera, Wifi, WifiOff, Plug, PlugZap, RefreshCw,
   FolderOpen, Play, Battery, HardDrive, Loader2,
-  CheckCircle2, XCircle,
+  CheckCircle2, XCircle, Download,
 } from "lucide-react";
 import { backendFetch, backendHeaders, probeBackendReachable } from "@/lib/backend";
+import { downloadCameraSetupInstaller } from "@/lib/cameraSetupDownload";
 import { saveFieldsCache, loadFieldsCache } from "@/lib/fieldsCache";
 import { analyzeRunHttp, analyzeFromUploadViaWebSocket, blobToBase64 } from "@/lib/analyze";
 import {
@@ -31,6 +32,8 @@ import {
   setCameraAuthToken,
   probeCameraViaProxy,
   triggerCameraCapture,
+  getFieldBridgeStatus,
+  type FieldBridgeStatus,
 } from "@/lib/camera";
 import { Field } from "@/types/backend";
 import { hasValidGps, isMapWorthyStress, toStressMapPoints } from "@/lib/gpsMap";
@@ -126,7 +129,12 @@ function CameraPanel({ selectedFieldId, analyzing, onAnalyzeCamera, onError }: C
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [loadingF, setLoadingF] = useState(false);
   const [working, setWorking] = useState(false);
+  const [lastError, setLastError] = useState<string | null>(null);
+  const [bridgeStatus, setBridgeStatus] = useState<FieldBridgeStatus | null>(null);
+  const [cameraMode, setCameraMode] = useState<"direct" | "bridge" | null>(null);
   const logRef = useRef<HTMLDivElement>(null);
+
+  const onHttpsApp = typeof window !== "undefined" && window.location.protocol === "https:";
 
   const connected = conn === "connected";
   const MOCK_FILES = ["IMG_0001.JPG", "IMG_0002.JPG", "IMG_0003.JPG", "IMG_0004.JPG", "IMG_0005.JPG", "IMG_0006.JPG"];
@@ -141,15 +149,40 @@ function CameraPanel({ selectedFieldId, analyzing, onAnalyzeCamera, onError }: C
 
   useEffect(() => { return () => { revokeIfBlobUrl(preview); }; }, [preview]);
 
+  useEffect(() => {
+    void getToken()
+      .then((token) => {
+        setCameraAuthToken(token);
+        return getFieldBridgeStatus();
+      })
+      .then((st) => { if (st) setBridgeStatus(st); })
+      .catch(() => setCameraAuthToken(null));
+  }, []);
+
   async function detectCamera() {
     setConn("connecting");
     setMock(false);
+    setLastError(null);
+    setCameraMode(null);
     addLog(`Checking camera at ${CAMERA_HOST}…`);
     try {
+      try {
+        const token = await getToken();
+        setCameraAuthToken(token);
+      } catch {
+        throw new Error("Sign in first, then try Detect camera again.");
+      }
+
       const probe = await probeCameraViaProxy();
       if (!probe.ok) throw new Error(probe.error ?? "timeout");
+      setCameraMode(probe.mode ?? null);
       setConn("connected");
-      addLog(`Camera detected at ${CAMERA_HOST}.`, "ok");
+      addLog(
+        probe.mode === "bridge"
+          ? `Camera detected via PC bridge (${CAMERA_HOST}).`
+          : `Camera detected at ${CAMERA_HOST}.`,
+        "ok",
+      );
       try {
         const st = await fetchCameraParams();
         const pairs: Record<string, string> = {};
@@ -164,6 +197,7 @@ function CameraPanel({ selectedFieldId, analyzing, onAnalyzeCamera, onError }: C
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       setConn("error"); setMock(false); setStatus({}); setFiles([]);
+      setLastError(msg);
       addLog(`Camera not reachable (${msg}).`, "err");
     }
   }
@@ -282,21 +316,54 @@ function CameraPanel({ selectedFieldId, analyzing, onAnalyzeCamera, onError }: C
         <p className="font-medium text-foreground">Two-step workflow on PC (one Wi‑Fi at a time)</p>
         <ol className="list-decimal list-inside space-y-1 text-muted-foreground">
           <li>
-            <span className="font-medium text-foreground">Step 1 — MAPIR Wi‑Fi:</span> detect camera, then tap a photo — it saves automatically
+            <span className="font-medium text-foreground">Step 1 — MAPIR Wi‑Fi:</span> PC on MAPIR + USB internet, detect camera, tap a photo — it saves on this device
           </li>
           <li>
             <span className="font-medium text-foreground">Step 2 — Internet Wi‑Fi:</span> switch network, reopen the app, click{" "}
             <span className="font-medium text-foreground">Analyze saved photo</span> in the yellow box
           </li>
         </ol>
+        {onHttpsApp && (
+          <p className="text-muted-foreground pt-1">
+            Using <span className="font-medium text-foreground">phytospectra.vercel.app</span> requires the one-time PC bridge below (browser cannot open the camera IP directly).
+          </p>
+        )}
       </div>
+
+      {onHttpsApp && !bridgeStatus?.websocket_connected && (
+        <Button
+          type="button"
+          size="sm"
+          className="gap-2 w-full"
+          onClick={() => downloadCameraSetupInstaller()}
+        >
+          <Download className="h-4 w-4" />
+          Set up this PC (one time)
+        </Button>
+      )}
+
+      {onHttpsApp && bridgeStatus?.websocket_connected && (
+        <p className="text-xs text-green-700 dark:text-green-400 flex items-center gap-1.5">
+          <CheckCircle2 className="h-3.5 w-3.5" />
+          PC bridge connected — Detect camera should work on MAPIR Wi‑Fi
+        </p>
+      )}
 
       {conn === "error" && (
         <div className="rounded-lg border border-red-200 bg-red-50 dark:bg-red-900/20 px-3 py-2 text-xs space-y-2">
           <p className="flex items-start gap-1.5 text-red-700 dark:text-red-300">
             <AlertTriangle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
-            Camera not found. Join the MAPIR hotspot in Windows Wi‑Fi first.
+            {lastError ?? "Camera not found."}
           </p>
+          {onHttpsApp ? (
+            <ol className="list-decimal list-inside space-y-1 text-muted-foreground">
+              <li>PC on <span className="font-medium text-foreground">MAPIR Wi‑Fi</span> + <span className="font-medium text-foreground">USB internet</span></li>
+              <li>Run uvicorn + <span className="font-medium text-foreground">ngrok http 8000</span></li>
+              <li>Click <span className="font-medium text-foreground">Set up this PC</span> once, then Detect camera</li>
+            </ol>
+          ) : (
+            <p className="text-muted-foreground">Join the MAPIR hotspot in Windows Wi‑Fi first.</p>
+          )}
           <Button size="sm" variant="outline" onClick={enableDemoMode} className="h-7 text-xs">Use demo mode</Button>
         </div>
       )}
