@@ -47,18 +47,15 @@ const agronomistLinks: NavLinkItem[] = [
 ];
 
 interface SidebarProps {
-  wsUrl: string;
   wsConnected: boolean;
   dbConnected: boolean;
-  unreadAlerts: number;
-  clearUnread: () => void;
+  pendingAlerts: number;
 }
 
-export function Sidebar({ unreadAlerts, clearUnread }: SidebarProps) {
+export function Sidebar({ pendingAlerts }: SidebarProps) {
   const { role, profile, signOut } = useAuth();
 
   const links = role === "agronomist" ? agronomistLinks : farmerLinks;
-  const alertPath = role === "agronomist" ? "/expert-desk" : "/expert";
 
   return (
     <aside className="relative hidden h-screen w-80 shrink-0 flex-col gradient-sidebar border-r border-white/5 text-[hsl(var(--sidebar-foreground))] lg:flex">
@@ -84,18 +81,17 @@ export function Sidebar({ unreadAlerts, clearUnread }: SidebarProps) {
               >
                 Phytospectra
               </NavLink>
-              {unreadAlerts > 0 && (
-                <button
-                  type="button"
-                  onClick={clearUnread}
+              {pendingAlerts > 0 && (
+                <NavLink
+                  to="/alerts"
                   className="relative flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-stress-severe/20 transition-smooth hover:bg-stress-severe/30"
-                  title="Clear alert notifications"
+                  title="View stress alerts"
                 >
                   <Bell className="h-4 w-4 text-stress-severe animate-pulse-live" />
                   <span className="absolute -right-1 -top-1 flex h-4 w-4 items-center justify-center rounded-full bg-stress-severe text-[9px] font-bold text-white">
-                    {unreadAlerts > 9 ? "9+" : unreadAlerts}
+                    {pendingAlerts > 9 ? "9+" : pendingAlerts}
                   </span>
-                </button>
+                </NavLink>
               )}
             </div>
             <div className="mt-2 flex flex-wrap items-center gap-2">
@@ -129,13 +125,11 @@ export function Sidebar({ unreadAlerts, clearUnread }: SidebarProps) {
       <nav className="relative z-10 flex min-h-0 flex-1 flex-col px-3 py-2">
         <div className="space-y-0.5">
           {links.map(({ to, label, icon }) => {
-            const isAlertLink = to === alertPath;
             const isAlertsPage = to === "/alerts";
             return (
               <NavLink
                 key={to}
                 to={to}
-                onClick={() => (isAlertLink || isAlertsPage) && clearUnread()}
                 className={({ isActive }) =>
                   cn(
                     "group relative flex items-center justify-between gap-2 rounded-xl px-3 py-2 text-[15px] font-medium transition-smooth",
@@ -155,9 +149,9 @@ export function Sidebar({ unreadAlerts, clearUnread }: SidebarProps) {
                       <span>{label}</span>
                     </span>
 
-                    {(isAlertLink || isAlertsPage) && unreadAlerts > 0 ? (
+                    {isAlertsPage && pendingAlerts > 0 ? (
                       <span className="flex h-5 min-w-5 shrink-0 animate-pulse-live items-center justify-center rounded-full bg-stress-severe px-1 text-[10px] font-bold text-white shadow-soft">
-                        {unreadAlerts > 9 ? "9+" : unreadAlerts}
+                        {pendingAlerts > 9 ? "9+" : pendingAlerts}
                       </span>
                     ) : null}
                   </>

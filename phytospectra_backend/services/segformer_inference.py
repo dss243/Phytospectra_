@@ -1,28 +1,23 @@
 """
 services/segformer_inference.py
 
-SegFormer-B0 inference for flight-level segmentation.
-Preprocessing matches segformer_v5_1 training script exactly:
-  - RGN input: build_rgn_input() → [R, G, NDVI_uint8] stacked as RGB
-  - NDVI: (NIR - Red) / (NIR + Red + 1e-6), NIR = channel index 2 (blue slot)
-  - SegformerImageProcessor with do_resize=False, do_rescale=True, do_normalize=True
-  - Patch size 512, overlap 64, soft-logit stitching
+SegFormer-B0 inference — aligned with segformer_boxfill + predict_single.py.
 
-V5.1 PATCH — Global NDVI background removal:
-  - Pixels with NDVI < NDVI_VEGETATION_THR are treated as background (soil/shadow/sky)
-  - Background pixels are set to IGNORE_LABEL in the final class map
-  - Applied after tiling inference, using the original raw float array
+Preprocessing matches training exactly:
+  - RGN input  : [R, G, NDVI_uint8] stacked as RGB
+  - Processor  : SegformerImageProcessor(do_resize=False, do_rescale=True,
+                                         do_normalize=True)
+  - Image size : resize whole image to IMG_SIZE=256, single forward pass
+  - Upsampling : bilinear upsample logits back to original resolution
 
-V5.2 PATCH — Largest-component background filtering:
-  - After NDVI masking, only the single largest connected background region is kept
-  - Smaller isolated background blobs are reassigned to the nearest vegetation class
-    (healthy=0 or stressed=1) based on whichever dominates their local surroundings
-  - Eliminates noise specks that pass the NDVI threshold but are not true background
+Display (predict_single.py behaviour):
+  - Model prediction is overlaid on the original image (natural colour)
+  - Soil pixels (NDVI below threshold) keep the original image — no green/red
+  - Only healthy / stressed vegetation pixels are colour-blended
 """
 
 from __future__ import annotations
 
-import io
 import logging
 import time
 from functools import lru_cache
@@ -37,46 +32,137 @@ from transformers import (
     SegformerForSemanticSegmentation,
     SegformerImageProcessor,
 )
+
 from core.config import settings
 
 logger = logging.getLogger(__name__)
 
 _BACKEND_ROOT = Path(__file__).resolve().parent.parent
 
-# ── Config — must match training script ──────────────────────────────────────
-_MODEL_PATH  = _BACKEND_ROOT / "models" / "segformer_b0_v5_1.pt"
-_PATCH_SIZE  = 512
-_DEVICE      = "cuda" if torch.cuda.is_available() else "cpu"
-_NUM_LABELS  = 2
+# ── Constants — must match training / predict_single.py ─────────────────────
+_SEGFORMER_BACKBONE = "nvidia/mit-b0"
+_MODEL_PATH = _BACKEND_ROOT / "models" / "segformer_b0_boxfill.pt"
+_IMG_SIZE = 256
+_NUM_LABELS = 2
+_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+IGNORE_LABEL = 255
 
-_SEG_CLASSES = {0: "healthy", 1: "stressed"}
+_SEG_CLASSES: dict[int, str] = {0: "healthy", 1: "stressed"}
 
-# Palette matches training script PALETTE exactly
-_PALETTE: dict[int, tuple[int, int, int]] = {
-    0: (46,  204, 113),   # healthy  — green
-    1: (231,  76,  60),   # stressed — red
+_CLASS_COLORS: dict[int, np.ndarray] = {
+    0: np.array([46, 204, 113], dtype=np.uint8),   # healthy  → green
+    1: np.array([231, 76, 60], dtype=np.uint8),    # stressed → red
 }
 
-# Background / ignored pixels rendered as white in the colour mask
-_BACKGROUND_COLOUR = (255, 255, 255)
+# Soil: NDVI below this → original image colour (no overlay). Matches predict_single.
+SOIL_NDVI_THRESHOLD: float = 0.10
+OVERLAY_ALPHA: float = 0.55
 
-# RGN channel indices (training script constants)
+# Image-level class: match analytics tiers (mild stress starts below 55% healthy veg).
+_DEFAULT_HEALTHY_CLASS_THRESHOLD = 55.0
+
+
+def healthy_class_threshold_pct() -> float:
+    return float(
+        getattr(settings, "SEGFORMER_HEALTHY_CLASS_PCT", _DEFAULT_HEALTHY_CLASS_THRESHOLD)
+    )
+
+
+def stress_alert_threshold_pct() -> float:
+    """Alert when stressed vegetation >= this % (all images, from settings)."""
+    return float(getattr(settings, "STRESS_ALERT_STRESSED_PCT", 30.0))
+
+
+def normalize_segformer_stats(row: dict) -> dict:
+    """Normalize stats dict from run_segformer or a DB row — any image."""
+    h = row.get("healthy_pixel_count")
+    s = row.get("stressed_pixel_count")
+    stressed_pct = row.get("stressed_percentage")
+    health_score = row.get("health_score")
+    if h is not None and s is not None:
+        try:
+            total = int(h) + int(s)
+            if total > 0:
+                if stressed_pct is None:
+                    stressed_pct = round(int(s) / total * 100, 2)
+                if health_score is None:
+                    health_score = round(int(h) / total * 100, 2)
+        except (TypeError, ValueError):
+            pass
+    return {
+        "stress_class": row.get("stress_class"),
+        "health_score": health_score,
+        "stressed_percentage": stressed_pct,
+        "healthy_pixel_count": h,
+        "stressed_pixel_count": s,
+    }
+
+
+def should_send_stress_alert(stats: dict) -> bool:
+    """
+    True when stressed vegetation >= STRESS_ALERT_STRESSED_PCT (default 30%).
+    Same rule for every SegFormer image — no per-file exceptions.
+    """
+    stats = normalize_segformer_stats(stats)
+    threshold = stress_alert_threshold_pct()
+    stressed_pct = stats.get("stressed_percentage")
+    if stressed_pct is not None:
+        try:
+            return float(stressed_pct) >= threshold
+        except (TypeError, ValueError):
+            pass
+    health = stats.get("health_score")
+    if health is not None:
+        try:
+            return float(health) <= (100.0 - threshold)
+        except (TypeError, ValueError):
+            pass
+    return stats.get("stress_class") == "stressed"
+
 _RGN_RED_IDX = 0
-_RGN_NIR_IDX = 2   # blue slot holds NIR in RGN imagery
-
-# ── V5.1 PATCH — Global NDVI background threshold ────────────────────────────
-# Pixels whose NDVI falls below this value are classified as background
-# and excluded from the output (set to IGNORE_LABEL = 255).
-# Tune for your dataset: 0.10 suits dense canopy; raise to 0.15–0.20
-# if bare soil bleeds into vegetation predictions.
-NDVI_VEGETATION_THR = 0.10
-IGNORE_LABEL        = 255   # matches training IGNORE_INDEX
+_RGN_NIR_IDX = 2
 
 
-# ── Preprocessing helpers (exact copy from training script) ──────────────────
+def _default_soil_threshold() -> float:
+    return float(getattr(settings, "SEGFORMER_NDVI_THRESHOLD", SOIL_NDVI_THRESHOLD))
+
+
+def _default_overlay_alpha() -> float:
+    return float(getattr(settings, "SEGFORMER_OVERLAY_ALPHA", OVERLAY_ALPHA))
+
+
+def _default_max_side() -> int:
+    """Longest edge for inference overlay (0 = full resolution, slow on CPU)."""
+    return int(getattr(settings, "SEGFORMER_MAX_SIDE", 1536))
+
+
+def _prepare_working_arrays(
+    raw_arr: np.ndarray,
+    max_side: int,
+) -> tuple[np.ndarray, np.ndarray, int, int, bool]:
+    """
+    Downscale large MAPIR frames before upsample/overlay on CPU.
+    Model still runs at 256×256; only post-processing resolution is capped.
+    """
+    h, w = raw_arr.shape[:2]
+    if max_side <= 0 or max(h, w) <= max_side:
+        return raw_arr, _compute_ndvi_rgn(raw_arr), w, h, False
+
+    scale = max_side / max(h, w)
+    nw, nh = max(1, int(w * scale)), max(1, int(h * scale))
+    u8 = raw_arr[:, :, :3].clip(0, 255).astype(np.uint8)
+    resized = np.array(
+        Image.fromarray(u8, mode="RGB").resize((nw, nh), Image.BILINEAR),
+        dtype=np.float32,
+    )
+    logger.info(
+        "SegFormer working size %dx%d (source %dx%d, max_side=%d)",
+        nw, nh, w, h, max_side,
+    )
+    return resized, _compute_ndvi_rgn(resized), nw, nh, True
 
 def _compute_ndvi_rgn(arr: np.ndarray) -> np.ndarray:
-    """arr: HxWxC float32.  NIR is in the blue slot (index 2)."""
+    """arr: H×W×C float32. NIR is in the blue slot (channel index 2)."""
     red = arr[:, :, _RGN_RED_IDX].astype(np.float32)
     nir = arr[:, :, _RGN_NIR_IDX].astype(np.float32)
     return ((nir - red) / (nir + red + 1e-6)).clip(-1.0, 1.0)
@@ -87,10 +173,7 @@ def _ndvi_to_uint8(ndvi: np.ndarray) -> np.ndarray:
 
 
 def _build_rgn_input(arr: np.ndarray) -> np.ndarray:
-    """
-    Convert raw image array → 3-channel uint8 [R, G, NDVI_uint8].
-    Matches training script build_rgn_input() exactly.
-    """
+    """[R, G, NDVI_uint8] — identical to open_model_input() in predict_single.py."""
     ndvi_u8 = _ndvi_to_uint8(_compute_ndvi_rgn(arr))
     return np.stack([
         arr[:, :, _RGN_RED_IDX].clip(0, 255).astype(np.uint8),
@@ -99,19 +182,9 @@ def _build_rgn_input(arr: np.ndarray) -> np.ndarray:
     ], axis=-1)
 
 
-def _open_as_rgn_pil(image_path: str) -> tuple[Image.Image, np.ndarray, np.ndarray]:
-    """
-    Open an image (TIFF or RGB), apply RGN preprocessing.
-
-    Returns:
-        pil_img  : PIL RGB image with [R, G, NDVI_uint8] channels
-        arr      : raw float32 array (H×W×3)
-        ndvi     : float32 NDVI map (H×W), range [-1, 1]
-    """
+def _load_raw_array(image_path: str) -> np.ndarray:
+    """Load image as H×W×3 float32 RGB (tifffile or PIL)."""
     path = Path(image_path)
-    arr: np.ndarray
-
-    # Try tifffile first (handles multi-band TIFFs)
     try:
         import tifffile
         arr = tifffile.imread(str(path)).astype(np.float32)
@@ -119,35 +192,58 @@ def _open_as_rgn_pil(image_path: str) -> tuple[Image.Image, np.ndarray, np.ndarr
             arr = np.stack([arr, arr, arr], axis=-1)
         if arr.ndim == 3 and arr.shape[0] in (1, 3):
             arr = np.transpose(arr, (1, 2, 0))
-        arr = arr[:, :, :3]
+        return arr[:, :, :3]
     except Exception:
-        arr = np.array(Image.open(path).convert("RGB")).astype(np.float32)
-
-    ndvi      = _compute_ndvi_rgn(arr)          # H×W float32, kept for background mask
-    rgn_uint8 = _build_rgn_input(arr)
-    return Image.fromarray(rgn_uint8, mode="RGB"), arr, ndvi
+        return np.array(Image.open(path).convert("RGB")).astype(np.float32)
 
 
-# ── Model loader (singleton, thread-safe via lru_cache) ─────────────────────
+def _open_as_rgn_pil(
+    image_path: str,
+) -> tuple[Image.Image, np.ndarray, np.ndarray]:
+    """
+    Returns
+    -------
+    pil_model_in : PIL RGB [R, G, NDVI_uint8] for the model
+    raw_arr      : float32 H×W×3 as stored
+    ndvi         : float32 H×W NDVI in [-1, 1]
+    """
+    raw_arr = _load_raw_array(image_path)
+    ndvi = _compute_ndvi_rgn(raw_arr)
+    rgn_uint8 = _build_rgn_input(raw_arr)
+    return Image.fromarray(rgn_uint8, mode="RGB"), raw_arr, ndvi
+
+
+def _raw_display_rgb(raw_arr: np.ndarray) -> np.ndarray:
+    """Original image for overlay — no channel manipulation (predict_single)."""
+    return raw_arr[:, :, :3].clip(0, 255).astype(np.uint8)
+
+
+def _soil_mask(ndvi: np.ndarray, threshold: float) -> np.ndarray:
+    """True where pixel is soil (low NDVI). Matches compute_ndvi_mask()."""
+    return ndvi < threshold
+
+
+# ── Model loader ──────────────────────────────────────────────────────────────
 
 @lru_cache(maxsize=1)
-def _load_segformer() -> tuple[SegformerForSemanticSegmentation, SegformerImageProcessor]:
+def _load_segformer() -> tuple[
+    SegformerForSemanticSegmentation, SegformerImageProcessor
+]:
     if not _MODEL_PATH.exists():
         raise FileNotFoundError(
-            f"SegFormer weights not found at {_MODEL_PATH.resolve()}. "
-            "Place segformer_b0_v5_1.pt in the models/ folder."
+            f"SegFormer weights not found at {_MODEL_PATH.resolve()}.\n"
+            "Place segformer_b0_boxfill.pt in the models/ folder."
         )
-    logger.info(f"Loading SegFormer from {_MODEL_PATH} on {_DEVICE}")
+    logger.info("Loading SegFormer from %s on %s", _MODEL_PATH, _DEVICE)
 
     processor = SegformerImageProcessor.from_pretrained(
-        "nvidia/mit-b0",
+        _SEGFORMER_BACKBONE,
         do_resize=False,
         do_rescale=True,
         do_normalize=True,
     )
-
     model = SegformerForSemanticSegmentation.from_pretrained(
-        "nvidia/mit-b0",
+        _SEGFORMER_BACKBONE,
         num_labels=_NUM_LABELS,
         id2label=_SEG_CLASSES,
         label2id={v: k for k, v in _SEG_CLASSES.items()},
@@ -156,227 +252,81 @@ def _load_segformer() -> tuple[SegformerForSemanticSegmentation, SegformerImageP
     state = torch.load(_MODEL_PATH, map_location=_DEVICE)
     if isinstance(state, dict) and "model_state_dict" in state:
         state = state["model_state_dict"]
-    model.load_state_dict(state, strict=False)
+    missing, unexpected = model.load_state_dict(state, strict=True)
+    if unexpected:
+        logger.warning("SegFormer unexpected keys: %s", unexpected[:5])
     model.to(_DEVICE).eval()
 
-    logger.info("SegFormer model ready")
+    logger.info("SegFormer model ready (%s)", _DEVICE)
     return model, processor
 
 
 def preload_segformer() -> None:
-    """Load weights at startup so the first gallery segmentation is faster."""
+    """Warm up model at app startup so the first request is fast."""
     _load_segformer()
 
 
-def _tile_overlap() -> int:
-    if _DEVICE == "cpu":
-        return settings.SEGFORMER_TILE_OVERLAP
-    return 64
-
-
-def _tile_batch_size() -> int:
-    if _DEVICE == "cpu":
-        return max(1, settings.SEGFORMER_TILE_BATCH)
-    return 8
-
-
-def _maybe_downscale(
-    pil_img: Image.Image, ndvi: np.ndarray, max_side: int
-) -> tuple[Image.Image, np.ndarray]:
-    w, h = pil_img.size
-    longest = max(w, h)
-    if longest <= max_side:
-        return pil_img, ndvi
-    scale = max_side / longest
-    nw, nh = max(1, int(w * scale)), max(1, int(h * scale))
-    logger.info("Inference downscale: %dx%d → %dx%d (max_side=%d)", w, h, nw, nh, max_side)
-    pil_out = pil_img.resize((nw, nh), Image.BILINEAR)
-    ndvi_u8 = ((ndvi + 1.0) * 127.5).clip(0, 255).astype(np.uint8)
-    ndvi_out = np.array(Image.fromarray(ndvi_u8).resize((nw, nh), Image.BILINEAR)).astype(
-        np.float32
-    )
-    ndvi_out = (ndvi_out / 127.5) - 1.0
-    return pil_out, ndvi_out
-
-
-# ── Core tiling inference ─────────────────────────────────────────────────────
+# ── Inference — single resize + forward pass ──────────────────────────────────
 
 @torch.no_grad()
-def _segment_pil(pil_img: Image.Image) -> np.ndarray:
-    """
-    Tile a PIL image, run SegFormer on batched patches, stitch soft logits.
-    Returns (H, W) uint8 class-index array.
-    """
+def _run_forward(pil_model_in: Image.Image) -> np.ndarray:
+    """Raw model prediction (0/1) at original resolution — not modified for soil."""
     model, processor = _load_segformer()
-    W, H = pil_img.size
-    img_np = np.array(pil_img.convert("RGB"))
+    orig_W, orig_H = pil_model_in.size
 
-    overlap = _tile_overlap()
-    step = _PATCH_SIZE - overlap
-    batch_size = _tile_batch_size()
-
-    logit_acc = np.zeros((_NUM_LABELS, H, W), dtype=np.float32)
-    count_acc = np.zeros((H, W), dtype=np.float32)
-
-    tiles: list[tuple[int, int, int, int, Image.Image]] = []
-    for r in range(0, H, step):
-        for c in range(0, W, step):
-            r1, r2 = r, min(r + _PATCH_SIZE, H)
-            c1, c2 = c, min(c + _PATCH_SIZE, W)
-            ph, pw = r2 - r1, c2 - c1
-            patch = img_np[r1:r2, c1:c2]
-            if ph < _PATCH_SIZE or pw < _PATCH_SIZE:
-                pad = np.zeros((_PATCH_SIZE, _PATCH_SIZE, 3), dtype=np.uint8)
-                pad[:ph, :pw] = patch
-                patch = pad
-            tiles.append((r1, r2, c1, c2, Image.fromarray(patch)))
-
-    n_tiles = len(tiles)
-    t0 = time.perf_counter()
-    for i in range(0, n_tiles, batch_size):
-        batch = tiles[i : i + batch_size]
-        patch_pils = [t[4] for t in batch]
-        encoding = processor(images=patch_pils, return_tensors="pt", do_resize=False)
-        pixel_values = encoding["pixel_values"].to(_DEVICE)
-
-        out = model(pixel_values=pixel_values)
-        logits = F.interpolate(
-            out.logits,
-            size=(_PATCH_SIZE, _PATCH_SIZE),
-            mode="bilinear",
-            align_corners=False,
-        )
-
-        for j, (r1, r2, c1, c2, _) in enumerate(batch):
-            ph, pw = r2 - r1, c2 - c1
-            logits_np = logits[j].cpu().numpy()
-            logit_acc[:, r1:r2, c1:c2] += logits_np[:, :ph, :pw]
-            count_acc[r1:r2, c1:c2] += 1.0
-
-    elapsed = time.perf_counter() - t0
-    logger.info(
-        "SegFormer tiles: %d (batch=%d, overlap=%d, %dx%d) in %.1fs on %s",
-        n_tiles, batch_size, overlap, W, H, elapsed, _DEVICE,
+    pil_resized = pil_model_in.resize((_IMG_SIZE, _IMG_SIZE), Image.BILINEAR)
+    encoding = processor(
+        images=pil_resized,
+        return_tensors="pt",
+        do_resize=False,
     )
+    pixel_values = encoding["pixel_values"].to(_DEVICE)
 
-    count_acc = np.where(count_acc == 0, 1, count_acc)
-    logit_acc /= count_acc[np.newaxis]
+    logits = model(pixel_values=pixel_values).logits
+    logits_up = F.interpolate(
+        logits,
+        size=(orig_H, orig_W),
+        mode="bilinear",
+        align_corners=False,
+    )
+    return logits_up.argmax(dim=1).squeeze(0).cpu().numpy().astype(np.uint8)
 
-    return logit_acc.argmax(axis=0).astype(np.uint8)
 
+# ── Overlay + stats (predict_single.py) ───────────────────────────────────────
 
-# ── V5.1 PATCH — Global NDVI background removal ───────────────────────────────
-
-def _apply_ndvi_background_mask(
-    class_map: np.ndarray,
-    ndvi: np.ndarray,
-    threshold: float = NDVI_VEGETATION_THR,
+def _build_overlay(
+    img_np: np.ndarray,
+    mask_np: np.ndarray,
+    soil_mask: np.ndarray,
+    alpha: float = OVERLAY_ALPHA,
 ) -> np.ndarray:
     """
-    Zero out predictions for non-vegetation pixels using a global NDVI threshold.
-
-    Pixels with NDVI < threshold are considered background (soil / shadow / sky)
-    and are set to IGNORE_LABEL (255) in the returned class map.
-
-    Args:
-        class_map : H×W uint8 array of predicted class indices
-        ndvi      : H×W float32 NDVI map, range [-1, 1]
-        threshold : NDVI cut-off below which pixels are treated as background
-
-    Returns:
-        masked class map (H×W uint8), background pixels = IGNORE_LABEL
+    Blend class colours only on vegetation pixels.
+    Soil pixels keep the original natural image colour.
     """
-    masked = class_map.copy()
-    background = ndvi < threshold        # True where pixel is NOT vegetation
-    masked[background] = IGNORE_LABEL
-    logger.debug(
-        f"NDVI background mask: {background.sum():,} / {background.size:,} pixels "
-        f"removed ({100 * background.mean():.1f}%)"
+    colour = np.zeros_like(img_np)
+    for cls_id, color in _CLASS_COLORS.items():
+        colour[mask_np == cls_id] = color
+
+    labelled = (mask_np == 0) | (mask_np == 1)
+    labelled = labelled & ~soil_mask
+
+    out = img_np.copy().astype(np.float32)
+    out[labelled] = (
+        alpha * colour[labelled].astype(np.float32)
+        + (1.0 - alpha) * img_np[labelled].astype(np.float32)
     )
-    return masked
+    return out.clip(0, 255).astype(np.uint8)
 
 
-# ── V5.2 PATCH — Largest-component background filtering ──────────────────────
-
-def _keep_largest_background(class_map: np.ndarray) -> np.ndarray:
-    """
-    Retain only the single largest connected region of IGNORE_LABEL (background).
-    All smaller isolated background blobs are reassigned to the dominant vegetation
-    class (healthy=0 or stressed=1) among their immediate 8-connected neighbours.
-
-    This removes noise specks that passed the NDVI threshold but are clearly not
-    part of the true continuous background region.
-
-    Args:
-        class_map : H×W uint8 array where IGNORE_LABEL=255 marks background pixels
-
-    Returns:
-        Updated class map (H×W uint8) with small background blobs reassigned.
-    """
-    from scipy.ndimage import label as ndi_label
-
-    binary = (class_map == IGNORE_LABEL).astype(np.uint8)
-    labeled, num_features = ndi_label(binary)
-
-    if num_features <= 1:
-        # Zero or one background region — nothing to clean up
-        return class_map
-
-    # Identify the largest connected background component
-    sizes       = np.bincount(labeled.ravel())
-    sizes[0]    = 0                          # index-0 is the non-background label
-    largest_lbl = int(sizes.argmax())
-
-    # Build mask of small (non-largest) background blobs
-    small_bg = (labeled > 0) & (labeled != largest_lbl)
-    if not small_bg.any():
-        return class_map
-
-    result = class_map.copy()
-
-    # For each small blob, pick the dominant vegetation class in its neighbourhood.
-    # We dilate the blob by 3 px and sample the surrounding vegetation pixels.
-    from scipy.ndimage import binary_dilation
-
-    small_labels = [lbl for lbl in range(1, num_features + 1) if lbl != largest_lbl]
-    struct       = np.ones((3, 3), dtype=bool)   # 8-connectivity
-
-    for lbl in small_labels:
-        blob      = labeled == lbl
-        dilated   = binary_dilation(blob, structure=struct, iterations=3)
-        neighbors = dilated & ~blob & (class_map != IGNORE_LABEL)
-
-        if neighbors.any():
-            neighbor_vals = class_map[neighbors]
-            # Majority vote among valid vegetation neighbours
-            counts       = np.bincount(neighbor_vals.astype(np.int64), minlength=2)
-            replacement  = int(counts[:2].argmax())
-        else:
-            # No vegetation neighbours found — default to healthy (0)
-            replacement = 0
-
-        result[blob] = replacement
-
-    removed = int(small_bg.sum())
-    logger.debug(
-        f"Largest-background filter: {num_features - 1} small blob(s) removed, "
-        f"{removed:,} pixels reassigned"
-    )
-    return result
-
-
-# ── Post-processing helpers ───────────────────────────────────────────────────
-
-def _colourise(class_map: np.ndarray) -> Image.Image:
-    """
-    Colourise a class map.
-    IGNORE_LABEL pixels → white (background).
-    """
-    H, W = class_map.shape
-    rgb  = np.full((H, W, 3), 255, dtype=np.uint8)   # white by default = background
-    for cls_idx, colour in _PALETTE.items():
-        rgb[class_map == cls_idx] = colour
-    return Image.fromarray(rgb, "RGB")
+def _class_map_for_storage(
+    pred_mask: np.ndarray,
+    soil_mask: np.ndarray,
+) -> np.ndarray:
+    """Canonical class map: 0/1 on vegetation, IGNORE_LABEL on soil."""
+    out = pred_mask.copy()
+    out[soil_mask] = IGNORE_LABEL
+    return out
 
 
 def _label_counts(class_map: np.ndarray) -> dict[str, int]:
@@ -384,91 +334,188 @@ def _label_counts(class_map: np.ndarray) -> dict[str, int]:
     return {str(int(u)): int(c) for u, c in zip(unique, counts)}
 
 
-def _compute_stats(class_map: np.ndarray) -> dict[str, Any]:
-    """
-    Return health metrics.
-    Background pixels (IGNORE_LABEL) are excluded from the denominator so
-    percentages reflect vegetation only — not the whole image footprint.
-    """
-    vegetation_mask = class_map != IGNORE_LABEL
-    total_veg = int(vegetation_mask.sum())
+def _compute_stats(
+    pred_mask: np.ndarray,
+    soil_mask: np.ndarray,
+    soil_threshold: float,
+) -> dict[str, Any]:
+    """Health metrics over vegetation pixels only (soil excluded)."""
+    veg = ~soil_mask
+    total_veg = int(veg.sum())
+    healthy = int(((pred_mask == 0) & veg).sum())
+    stressed = int(((pred_mask == 1) & veg).sum())
+    soil_px = int(soil_mask.sum())
 
-    healthy  = int((class_map == 0).sum())
-    stressed = int((class_map == 1).sum())
-
-    # Percentages over vegetation pixels only (background excluded)
-    health_pct   = round(healthy  / total_veg * 100, 2) if total_veg > 0 else 0.0
+    health_pct = round(healthy / total_veg * 100, 2) if total_veg > 0 else 0.0
     stressed_pct = round(stressed / total_veg * 100, 2) if total_veg > 0 else 0.0
-    health_score = health_pct   # 0–100 float, same convention as ViT pipeline
+    healthy_threshold = healthy_class_threshold_pct()
+    if health_pct >= healthy_threshold:
+        stress_class = "healthy"
+        confidence = round(healthy / total_veg, 4) if total_veg > 0 else 0.0
+    else:
+        stress_class = "stressed"
+        confidence = round(stressed / total_veg, 4) if total_veg > 0 else 0.0
+
+    alert_worthy = should_send_stress_alert({
+        "health_score": health_pct,
+        "stressed_percentage": stressed_pct,
+        "stress_class": stress_class,
+        "healthy_pixel_count": healthy,
+        "stressed_pixel_count": stressed,
+    })
 
     return {
-        "healthy_pixel_count":    healthy,
-        "stressed_pixel_count":   stressed,
-        "background_pixel_count": int((class_map == IGNORE_LABEL).sum()),
+        "healthy_pixel_count": healthy,
+        "stressed_pixel_count": stressed,
+        "background_pixel_count": soil_px,
         "vegetation_pixel_count": total_veg,
-        "health_percentage":      health_pct,
-        "stressed_percentage":    stressed_pct,
-        "health_score":           health_score,
-        "stress_class":           "healthy" if healthy >= stressed else "stressed",
-        "confidence":             round(max(healthy, stressed) / total_veg, 4) if total_veg > 0 else 0.0,
-        "ndvi_threshold_used":    NDVI_VEGETATION_THR,
+        "health_percentage": health_pct,
+        "stressed_percentage": stressed_pct,
+        "health_score": health_pct,
+        "stress_class": stress_class,
+        "confidence": confidence,
+        "alert_worthy": alert_worthy,
+        "ndvi_threshold_used": soil_threshold,
     }
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
+_USE_DEFAULT_SOIL = object()
+
+
 def run_segformer(
     image_path: str,
-    ndvi_threshold: float = NDVI_VEGETATION_THR,
+    ndvi_threshold: float | None = _USE_DEFAULT_SOIL,  # type: ignore[assignment]
+    overlay_alpha: float | None = None,
 ) -> dict[str, Any]:
     """
-    Run full SegFormer segmentation on a single image file,
-    with global NDVI-based background removal and largest-component filtering.
+    Run SegFormer on any image file (MAPIR TIFF/JPEG, gallery upload, ESP32, etc.).
 
-    Args:
-        image_path     : path to the input image (TIFF or standard format)
-        ndvi_threshold : NDVI cut-off for background removal (default 0.10).
-                         Raise to 0.15–0.20 for images with heavy bare-soil.
-
-    Returns:
-        {
-            "class_map":              np.ndarray (H×W uint8, 255=background),
-            "mask_image":             PIL.Image  (RGB colourised, white=background),
-            "label_counts":           {"0": int, "1": int, "255": int},
-            "healthy_pixel_count":    int,
-            "stressed_pixel_count":   int,
-            "background_pixel_count": int,
-            "vegetation_pixel_count": int,
-            "health_percentage":      float,   # over vegetation only
-            "stressed_percentage":    float,   # over vegetation only
-            "health_score":           float,   # 0–100
-            "stress_class":           str,
-            "confidence":             float,
-            "ndvi_threshold_used":    float,
-        }
+    Same model, preprocessing, health/stress stats, and alert thresholds for every
+    image — identical pipeline to predict_single.py in the notebook.
     """
-    # 1. Load image → RGN PIL + raw array + NDVI map
-    pil_img, _arr, ndvi = _open_as_rgn_pil(image_path)
-    pil_img, ndvi = _maybe_downscale(pil_img, ndvi, settings.SEGFORMER_MAX_SIDE)
+    if ndvi_threshold is _USE_DEFAULT_SOIL:
+        soil_threshold = _default_soil_threshold()
+    else:
+        soil_threshold = ndvi_threshold
 
-    # 2. Tiling inference → raw class map
+    alpha = overlay_alpha if overlay_alpha is not None else _default_overlay_alpha()
+    max_side = _default_max_side()
+
+    t_load = time.perf_counter()
+    raw_full = _load_raw_array(image_path)
+    raw_arr, ndvi, work_w, work_h, was_scaled = _prepare_working_arrays(raw_full, max_side)
+    rgn_uint8 = _build_rgn_input(raw_arr)
+    pil_model_in = Image.fromarray(rgn_uint8, mode="RGB")
+    img_np = _raw_display_rgb(raw_arr)
+    logger.info(
+        "run_segformer load %.2fs | %s | work=%dx%d scaled=%s",
+        time.perf_counter() - t_load,
+        Path(image_path).name,
+        work_w,
+        work_h,
+        was_scaled,
+    )
+
+    if soil_threshold is not None:
+        soil = _soil_mask(ndvi, soil_threshold)
+    else:
+        soil = np.zeros(ndvi.shape, dtype=bool)
+
     t0 = time.perf_counter()
-    class_map = _segment_pil(pil_img)
-    logger.info("run_segformer inference %.1fs | %s", time.perf_counter() - t0, image_path)
+    pred_mask = _run_forward(pil_model_in)
+    t_infer = time.perf_counter() - t0
 
-    # 3. V5.1 PATCH: mask out background pixels globally using NDVI
-    class_map = _apply_ndvi_background_mask(class_map, ndvi, threshold=ndvi_threshold)
+    t1 = time.perf_counter()
+    overlay = _build_overlay(img_np, pred_mask, soil, alpha=alpha)
+    mask_image = Image.fromarray(overlay, "RGB")
+    t_overlay = time.perf_counter() - t1
 
-    # 4. V5.2 PATCH: discard small background blobs, keep only the dominant region
-    class_map = _keep_largest_background(class_map)
+    class_map = _class_map_for_storage(pred_mask, soil)
+    stats = _compute_stats(
+        pred_mask,
+        soil,
+        soil_threshold if soil_threshold is not None else SOIL_NDVI_THRESHOLD,
+    )
 
-    # 5. Colourise + stats
-    mask_image = _colourise(class_map)
-    stats      = _compute_stats(class_map)
+    logger.info(
+        "run_segformer done infer=%.2fs overlay=%.2fs device=%s | veg=%d stressed=%d",
+        t_infer,
+        t_overlay,
+        _DEVICE,
+        stats["healthy_pixel_count"],
+        stats["stressed_pixel_count"],
+    )
 
     return {
-        "class_map":    class_map,
-        "mask_image":   mask_image,
+        "class_map": class_map,
+        "pred_mask": pred_mask,
+        "mask_image": mask_image,
         "label_counts": _label_counts(class_map),
         **stats,
     }
+
+
+def visualise_prediction(
+    image_path: str,
+    label_path: str | None = None,
+    save_path: str | None = None,
+) -> np.ndarray:
+    """
+    Three-panel figure like predict_single.py:
+    original | (optional GT) | prediction overlay.
+    """
+    import matplotlib.pyplot as plt
+    import matplotlib.patches as mpatches
+
+    soil_threshold = _default_soil_threshold()
+    alpha = _default_overlay_alpha()
+
+    pil_model_in, raw_arr, ndvi = _open_as_rgn_pil(image_path)
+    img_np = _raw_display_rgb(raw_arr)
+    soil = _soil_mask(ndvi, soil_threshold)
+    pred_mask = _run_forward(pil_model_in)
+    pred_overlay = _build_overlay(img_np, pred_mask, soil, alpha=alpha)
+
+    n_cols = 2
+    fig, axes = plt.subplots(1, n_cols, figsize=(6 * n_cols, 6))
+
+    axes[0].imshow(img_np)
+    axes[0].set_title("Original Image", fontsize=13, fontweight="bold")
+    axes[0].axis("off")
+
+    axes[1].imshow(pred_overlay)
+    axes[1].set_title("Model Prediction", fontsize=13, fontweight="bold")
+    axes[1].axis("off")
+
+    legend = [
+        mpatches.Patch(
+            color=tuple(c / 255 for c in _CLASS_COLORS[0]),
+            label="Healthy",
+        ),
+        mpatches.Patch(
+            color=tuple(c / 255 for c in _CLASS_COLORS[1]),
+            label="Stressed",
+        ),
+    ]
+    axes[1].legend(handles=legend, loc="lower right", fontsize=11, framealpha=0.8)
+
+    plt.suptitle(Path(image_path).name, fontsize=12, fontweight="bold", y=1.01)
+    plt.tight_layout()
+
+    if save_path:
+        plt.savefig(save_path, dpi=150, bbox_inches="tight")
+        print(f"Saved -> {save_path}")
+    else:
+        plt.show()
+
+    total = pred_mask.size
+    veg = ~soil
+    print("\nPrediction breakdown (vegetation only):")
+    for c in range(_NUM_LABELS):
+        n = int(((pred_mask == c) & veg).sum())
+        print(f"  {_SEG_CLASSES[c]:10s}: {n:>8,} px  ({100 * n / max(1, veg.sum()):.1f}%)")
+    print(f"  {'soil':10s}: {int(soil.sum()):>8,} px  ({100 * soil.mean():.1f}%)")
+
+    return pred_mask

@@ -2,9 +2,26 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import logging
+from typing import Any, Optional
+
 from core.config import settings
 
 logger = logging.getLogger(__name__)
+
+
+def lookup_user_email(supabase_client: Any, user_id: Optional[str]) -> Optional[str]:
+    """Resolve a Supabase auth user's email (service role required)."""
+    if not user_id or not supabase_client:
+        return None
+    try:
+        res = supabase_client.auth.admin.get_user_by_id(user_id)
+        user = getattr(res, "user", None)
+        email = getattr(user, "email", None) if user else None
+        if email and "@" in email:
+            return email.strip()
+    except Exception as e:
+        logger.warning("Email lookup failed for user %s: %s", user_id, e)
+    return None
 
 
 def send_stress_email(
@@ -82,3 +99,47 @@ def send_stress_email(
 
         except Exception as e:
             logger.error("Failed to send email to %s: %s", recipient, e)
+
+
+def notify_stress_alert_emails(
+    supabase_client: Any,
+    *,
+    farmer_id: str,
+    agronomist_id: Optional[str],
+    field_id: str,
+    health_score: float,
+    severity: str,
+    message: str,
+    lat: float,
+    lng: float,
+) -> list[str]:
+    """
+    Email the farmer and matched agronomist from GMAIL_SENDER (e.g. phytospectra@gmail.com).
+    Returns the list of addresses emailed.
+    """
+    recipients: list[str] = []
+    for uid in (farmer_id, agronomist_id):
+        if not uid:
+            continue
+        email = lookup_user_email(supabase_client, uid)
+        if email and email not in recipients:
+            recipients.append(email)
+
+    if not recipients:
+        logger.warning(
+            "Stress alert email skipped — no addresses for farmer=%s agronomist=%s",
+            farmer_id,
+            agronomist_id,
+        )
+        return []
+
+    send_stress_email(
+        to_emails=recipients,
+        field_id=field_id,
+        health_score=health_score,
+        severity=severity,
+        message=message,
+        lat=lat,
+        lng=lng,
+    )
+    return recipients

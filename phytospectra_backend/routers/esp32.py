@@ -5,22 +5,27 @@ The farmer creates a flight in the app; the ESP32 polls GET /api/esp32/mission
 using its device_id (drones.esp32_device_id), uploads to Supabase storage,
 then POSTs /api/esp32/image-record (or upload-raw) so rows land in the images table.
 
-Mission resolution:
-  1. Find ALL drones with esp32_device_id == device_id
-  2. Find the most recently CREATED flight (created_at desc) for that farmer,
-     using any of their drone rows (one physical ESP32, many field labels)
-  3. Return that flight's user_id / field_id / flight_id / drone_id / bucket
+Mission resolution (in order):
+  1. Optional flight_id override on upload
+  2. Newest flight for drones linked to device_id (automatic — no app tap required)
+  3. esp32_active_missions registry (optional pin via "Pin for ESP32" in the app)
 """
 import logging
 import os
 import uuid
 from typing import Optional
 
-from fastapi import APIRouter, Header, HTTPException, Query, UploadFile, File, Form, Request
+from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Query, UploadFile, File, Form, Request
 from pydantic import BaseModel
 
 from core.config import settings
-from services.supabase_service import get_supabase, save_image
+from routers.Segmentflight import auto_segment_image
+from services.supabase_service import (
+    get_supabase,
+    save_image,
+    resolve_esp32_active_flight,
+    pick_user_and_flight_for_esp32_device,
+)
 from services.calibration import extract_gps_from_exif
 
 logger = logging.getLogger(__name__)
@@ -46,8 +51,20 @@ def _get_client():
     return client
 
 
+def _fetch_flight_by_id(client, flight_id: str, user_id: str) -> Optional[dict]:
+    res = (
+        client.table("flights")
+        .select("id, user_id, field_id, drone_id, created_at")
+        .eq("id", flight_id)
+        .eq("user_id", user_id)
+        .limit(1)
+        .execute()
+    )
+    return res.data[0] if res.data else None
+
+
 def _fetch_latest_flight(client, user_id: str, drone_ids: list) -> Optional[dict]:
-    """Newest flight by created_at across drone_ids (your spec)."""
+    """Newest flight by created_at for specific drone_ids."""
     if not drone_ids:
         return None
     for order_col in ("created_at", "id"):
@@ -68,19 +85,38 @@ def _fetch_latest_flight(client, user_id: str, drone_ids: list) -> Optional[dict
     return None
 
 
+def _fetch_latest_flight_for_user(client, user_id: str) -> Optional[dict]:
+    """Newest flight for farmer — includes rows with null drone_id."""
+    for order_col in ("created_at", "id"):
+        try:
+            res = (
+                client.table("flights")
+                .select("id, user_id, field_id, drone_id, created_at")
+                .eq("user_id", user_id)
+                .order(order_col, desc=True)
+                .limit(1)
+                .execute()
+            )
+            if res.data:
+                return res.data[0]
+        except Exception as e:
+            logger.warning("latest user flight order %s failed: %s", order_col, e)
+    return None
+
+
 def _resolve_mission(device_id: str, flight_id_override: Optional[str] = None) -> dict:
     """
-    All drones with this esp32_device_id → latest CREATED flight for that farmer.
+    Resolve upload target for this ESP32 device_id.
+    If the device id is registered on multiple accounts, use whichever account
+    has the newest flight (typical: only one farmer has created flights).
     """
     client = _get_client()
+    device_id = (device_id or "").strip()
 
-    drone_res = (
-        client.table("drones")
-        .select("id, user_id, field_id, esp32_device_id, drone_name")
-        .eq("esp32_device_id", device_id)
-        .execute()
+    user_id, auto_flight, esp32_drones = pick_user_and_flight_for_esp32_device(
+        client, device_id
     )
-    if not drone_res.data:
+    if not esp32_drones:
         raise HTTPException(
             status_code=404,
             detail=(
@@ -89,51 +125,60 @@ def _resolve_mission(device_id: str, flight_id_override: Optional[str] = None) -
             ),
         )
 
-    esp32_drones = drone_res.data
-    user_id = esp32_drones[0]["user_id"]
-    esp32_drone_ids = [d["id"] for d in esp32_drones]
+    if not user_id:
+        user_id = esp32_drones[0]["user_id"]
 
-    # Fallback: one physical ESP32, flights may use any field-label drone row.
-    all_drone_res = (
-        client.table("drones")
-        .select("id")
-        .eq("user_id", user_id)
-        .execute()
-    )
-    all_drone_ids = [d["id"] for d in (all_drone_res.data or [])] or esp32_drone_ids
+    esp32_drones_for_user = [d for d in esp32_drones if d.get("user_id") == user_id]
 
     flight = None
 
     if flight_id_override:
-        locked = (
-            client.table("flights")
-            .select("id, user_id, field_id, drone_id, created_at")
-            .eq("id", flight_id_override)
-            .eq("user_id", user_id)
-            .limit(1)
-            .execute()
-        )
-        if not locked.data:
+        flight = _fetch_flight_by_id(client, flight_id_override, user_id)
+        if not flight:
             raise HTTPException(
                 status_code=400,
                 detail=f"flight_id '{flight_id_override}' not found for this account",
             )
-        flight = locked.data[0]
+
+    if not flight and auto_flight:
+        flight = {
+            "id": auto_flight["id"],
+            "user_id": user_id,
+            "field_id": auto_flight.get("field_id"),
+            "drone_id": auto_flight.get("drone_id"),
+            "created_at": auto_flight.get("created_at"),
+        }
+        logger.info(
+            "ESP32 mission auto-resolved device=%s user=%s flight=%s",
+            device_id,
+            user_id,
+            auto_flight["id"],
+        )
 
     if not flight:
-        flight = _fetch_latest_flight(client, user_id, esp32_drone_ids)
-    if not flight:
-        flight = _fetch_latest_flight(client, user_id, all_drone_ids)
+        resolved = resolve_esp32_active_flight(client, user_id, device_id)
+        if resolved:
+            flight = {
+                "id": resolved["id"],
+                "user_id": user_id,
+                "field_id": resolved.get("field_id"),
+                "drone_id": resolved.get("drone_id"),
+                "created_at": resolved.get("created_at"),
+            }
+
     if not flight:
         raise HTTPException(
             status_code=404,
-            detail="No flight found — create a flight in the app first.",
+            detail=(
+                "No flight found — create a flight in the app "
+                "(ESP32 uses the newest one automatically)."
+            ),
         )
 
     field_id = flight.get("field_id")
     if not field_id:
         raise HTTPException(status_code=404, detail="Flight has no field_id")
-    drone_id = flight.get("drone_id") or esp32_drones[0]["id"]
+    drone_id = flight.get("drone_id") or esp32_drones_for_user[0]["id"]
 
     field_name = None
     try:
@@ -205,9 +250,19 @@ class ImageRecordBody(BaseModel):
     flight_id: Optional[str] = None
 
 
+def _queue_auto_segment(
+    background_tasks: BackgroundTasks,
+    image_id: Optional[str],
+    user_id: str,
+) -> None:
+    if image_id:
+        background_tasks.add_task(auto_segment_image, image_id, user_id)
+
+
 @router.post("/esp32/image-record")
 async def register_esp32_image(
     body: ImageRecordBody,
+    background_tasks: BackgroundTasks,
     x_esp32_key: Optional[str] = Header(None, alias="X-ESP32-Key"),
 ):
     """
@@ -234,9 +289,11 @@ async def register_esp32_image(
         .execute()
     )
     if existing.data:
+        image_id = existing.data[0]["id"]
+        _queue_auto_segment(background_tasks, image_id, mission["user_id"])
         return {
             "status": "already_registered",
-            "image_id": existing.data[0]["id"],
+            "image_id": image_id,
             "storage_path": body.storage_path,
         }
 
@@ -263,6 +320,7 @@ async def register_esp32_image(
         image_id,
         mission["flight_id"],
     )
+    _queue_auto_segment(background_tasks, image_id, mission["user_id"])
     return {
         "status": "registered",
         "image_id": image_id,
@@ -273,6 +331,7 @@ async def register_esp32_image(
 
 @router.post("/esp32/upload")
 async def esp32_upload_image(
+    background_tasks: BackgroundTasks,
     device_id: str = Form(...),
     file: UploadFile = File(...),
     original_filename: Optional[str] = Form(None),
@@ -339,6 +398,7 @@ async def esp32_upload_image(
 
     image_id = image_row.get("id")
     logger.info("ESP32 upload device=%s path=%s id=%s", device_id, storage_path, image_id)
+    _queue_auto_segment(background_tasks, image_id, mission["user_id"])
     return {
         "status": "uploaded",
         "image_id": image_id,
@@ -351,6 +411,7 @@ async def esp32_upload_image(
 @router.post("/esp32/upload-raw")
 async def esp32_upload_image_raw(
     request: Request,
+    background_tasks: BackgroundTasks,
     device_id: str = Query(...),
     flight_id: Optional[str] = Query(None, description="Mission flight_id from GET /esp32/mission"),
     original_filename: Optional[str] = Query("photo.jpg"),
@@ -426,6 +487,7 @@ async def esp32_upload_image_raw(
         storage_path,
         image_id,
     )
+    _queue_auto_segment(background_tasks, image_id, mission["user_id"])
     return {
         "status": "uploaded",
         "image_id": image_id,

@@ -1,16 +1,16 @@
 import { useRef, useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import type { StressAlertMessage } from "@/hooks/useWebSocket";
 
 interface Props {
-  lastAlert:    StressAlertMessage | null;
-  unreadAlerts: number;
-  clearUnread:  () => void;
+  lastAlert: StressAlertMessage | null;
+  pendingAlerts: number;
 }
 
 const SEV_COLOR = { high: "text-red-500", medium: "text-amber-500", low: "text-green-600" };
 const SEV_BAR   = { high: "#e24b4a",      medium: "#ef9f27",        low: "#639922" };
 
-export function AlertBell({ lastAlert, unreadAlerts, clearUnread }: Props) {
+export function AlertBell({ lastAlert, pendingAlerts }: Props) {
   const [open, setOpen]       = useState(false);
   const [history, setHistory] = useState<StressAlertMessage[]>([]);
   const panelRef              = useRef<HTMLDivElement>(null);
@@ -23,10 +23,6 @@ export function AlertBell({ lastAlert, unreadAlerts, clearUnread }: Props) {
         : [lastAlert, ...prev].slice(0, 50)
     );
   }, [lastAlert]);
-
-  useEffect(() => {
-    if (open) clearUnread();
-  }, [open, clearUnread]);
 
   useEffect(() => {
     const handler = (e: MouseEvent) => {
@@ -42,14 +38,14 @@ export function AlertBell({ lastAlert, unreadAlerts, clearUnread }: Props) {
     <div className="relative" ref={panelRef}>
       <button
         onClick={() => setOpen(v => !v)}
-        aria-label={`${unreadAlerts} unread alerts`}
+        aria-label={`${pendingAlerts} unread alerts`}
         className="relative p-2 rounded-md hover:bg-muted transition-colors"
       >
         <span className="ti ti-bell text-xl" aria-hidden="true" />
-        {unreadAlerts > 0 && (
+        {pendingAlerts > 0 && (
           <span className="absolute top-0.5 right-0.5 h-4 w-4 rounded-full bg-red-500
-                           text-white text-[10px] font-medium flex items-center justify-center">
-            {unreadAlerts > 9 ? "9+" : unreadAlerts}
+                           text-white text-[10px] font-medium flex items-center justify-center animate-pulse">
+            {pendingAlerts > 9 ? "9+" : pendingAlerts}
           </span>
         )}
       </button>
@@ -57,9 +53,18 @@ export function AlertBell({ lastAlert, unreadAlerts, clearUnread }: Props) {
       {open && (
         <div className="absolute right-0 mt-2 w-80 bg-background border rounded-lg
                         shadow-lg z-50 max-h-[420px] overflow-y-auto">
-          <p className="px-4 py-2.5 text-sm font-medium border-b text-muted-foreground sticky top-0 bg-background">
-            Alerts
-          </p>
+          <div className="flex items-center justify-between px-4 py-2.5 border-b sticky top-0 bg-background">
+            <p className="text-sm font-medium text-muted-foreground">Alerts</p>
+            {pendingAlerts > 0 && (
+              <Link
+                to="/alerts"
+                onClick={() => setOpen(false)}
+                className="text-xs font-semibold text-red-600 hover:text-red-700"
+              >
+                Open Stress Alerts →
+              </Link>
+            )}
+          </div>
 
           {history.length === 0 ? (
             <p className="px-4 py-8 text-sm text-center text-muted-foreground">

@@ -260,7 +260,9 @@ export default function Flights() {
         setDraft({ field_id: initialField, drone_id: matchedDrone?.id || "", altitude: undefined });
 
         const fl = await loadFlights(initialField || undefined);
-        if (active) setItems(fl);
+        if (active) {
+          setItems(fl);
+        }
       } catch (e) {
         if (active) setError(e instanceof Error ? e.message : "Failed to load data");
       } finally {

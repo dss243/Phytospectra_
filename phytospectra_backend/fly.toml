@@ -8,7 +8,7 @@
 # Upload models (one-time):
 #   fly ssh sftp shell
 #   put models/vit_ndvi_leaf_health.pt /app/models/
-#   put models/segformer_b0_v5_1.pt /app/models/
+#   put models/segformer_b0_boxfill.pt /app/models/
 
 app = "phytospectra-api"
 primary_region = "cdg"

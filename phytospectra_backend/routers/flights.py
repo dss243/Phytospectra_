@@ -39,7 +39,7 @@ async def create_flight(data: FlightCreate, user=Depends(get_current_user)):
 
 @router.get("/flights/esp32/active")
 async def get_esp32_active_flight(user=Depends(get_current_user)):
-    """Which flight the shared ESP32 will upload to."""
+    """Which flight the shared ESP32 will upload to (newest flight unless pinned)."""
     client = supabase_service.get_supabase()
     if not client:
         raise HTTPException(status_code=500, detail="Supabase not available")
@@ -48,29 +48,22 @@ async def get_esp32_active_flight(user=Depends(get_current_user)):
     if not device_id:
         return {"device_id": None, "flight_id": None, "field_id": None, "field_name": None}
 
-    flight_id = supabase_service.get_esp32_active_flight_id(client, device_id)
-    if not flight_id:
-        return {"device_id": device_id, "flight_id": None, "field_id": None, "field_name": None}
+    row = supabase_service.resolve_esp32_active_flight(client, user["sub"], device_id)
+    if not row:
+        return {
+            "device_id": device_id,
+            "flight_id": None,
+            "field_id": None,
+            "field_name": None,
+        }
 
-    flight_res = (
-        client.table("flights")
-        .select("id, field_id, fields(field_name)")
-        .eq("id", flight_id)
-        .eq("user_id", user["sub"])
-        .limit(1)
-        .execute()
-    )
-    if not flight_res.data:
-        return {"device_id": device_id, "flight_id": flight_id, "field_id": None, "field_name": None}
-
-    row = flight_res.data[0]
     field_name = None
     fields_rel = row.get("fields")
     if isinstance(fields_rel, dict):
         field_name = fields_rel.get("field_name")
     return {
         "device_id": device_id,
-        "flight_id": flight_id,
+        "flight_id": row.get("id"),
         "field_id": row.get("field_id"),
         "field_name": field_name,
     }
@@ -100,7 +93,14 @@ async def activate_flight_for_esp32(flight_id: str, user=Depends(get_current_use
     flight = flight_res.data[0]
     drone_id = flight.get("drone_id")
 
-    supabase_service.set_esp32_active_flight(client, user["sub"], drone_id, flight_id)
+    ok, err = supabase_service.set_esp32_active_flight(
+        client, user["sub"], drone_id, flight_id
+    )
+    if not ok:
+        raise HTTPException(
+            status_code=500,
+            detail=err or "Failed to save ESP32 active flight — run Supabase migration SQL",
+        )
     return {
         "status": "active",
         "flight_id": flight_id,

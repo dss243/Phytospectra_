@@ -9,7 +9,7 @@ import { supabase } from "@/integrations/supabase/client";
 import { getBackendBaseUrl, backendFetch, backendHeaders } from "@/lib/backend";
 import { resolveMaskUrls, type MaskResult } from "@/lib/maskUrls";
 import { StressZoneMapSection } from "@/components/StressZoneMapSection";
-import { mergeSegmentRowsForMap, toStressMapPoints } from "@/lib/gpsMap";
+import { mergeSegmentRowsForMap, toSegmentationMapPoints } from "@/lib/gpsMap";
 
 type DisplayRow = MaskResult & {
   previewUrl: string | null;
@@ -150,7 +150,7 @@ export default function Segmentations() {
 
   const runSegmentation = () => loadResults(true);
 
-  const mapPoints = useMemo(() => toStressMapPoints(items), [items]);
+  const mapPoints = useMemo(() => toSegmentationMapPoints(items), [items]);
   const busy = pending || running;
 
   return (
@@ -179,7 +179,7 @@ export default function Segmentations() {
           fieldName={fieldMeta?.field_name}
           selectedId={selectedId}
           onSelect={(p) => setSelectedId(p.image_id)}
-          emptyHint="Field map shown — no stressed pins with GPS. Check images have EXIF GPS or set field location in Fields."
+          emptyHint="Field map shown — no segmented images with GPS. Check images have EXIF GPS or set field location in Fields."
         />
       )}
 

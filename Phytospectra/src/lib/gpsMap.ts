@@ -23,7 +23,7 @@ export function normalizeGps(raw: unknown): GpsCoords | null {
   return hasValidGps(coords) ? coords : null;
 }
 
-/** Map pins only for moderate (35–54) and severe (<35) — SegFormer "stressed" always included. */
+/** Map pins — moderate/severe only when stressedOnly (Gallery stress view). Analytics uses all tiers. */
 export type StressMapTier = "moderate" | "severe";
 
 export function stressMapTier(
@@ -34,13 +34,12 @@ export function stressMapTier(
   if (cls === "healthy") return null;
 
   if (health_score != null && Number.isFinite(health_score)) {
-    if (cls !== "stressed" && health_score >= 55) return null;
+    if (health_score >= 55) return null;
     if (health_score >= 35) return "moderate";
     return "severe";
   }
 
   if (cls === "stressed") return "moderate";
-  if (cls && cls !== "healthy") return "moderate";
   return null;
 }
 
@@ -75,6 +74,37 @@ export function mergeSegmentRowsForMap(
   });
 }
 
+export function toUploadedMapPoints(
+  rows: {
+    image_id: string;
+    lat?: number | null;
+    lng?: number | null;
+    gps_source?: string | null;
+    upload_source?: string | null;
+  }[],
+): StressMapPoint[] {
+  return rows.flatMap((row) => {
+    const gps = normalizeGps(
+      row.lat != null && row.lng != null ? { lat: row.lat, lng: row.lng } : null,
+    );
+    if (!gps) return [];
+    return [
+      {
+        image_id: row.image_id,
+        lat: gps.lat,
+        lng: gps.lng,
+        gps_source: row.gps_source ?? undefined,
+        upload_source: row.upload_source ?? undefined,
+        pin_kind: "uploaded" as const,
+      },
+    ];
+  });
+}
+
+export function toSegmentationMapPoints(rows: SegmentMapRow[]): StressMapPoint[] {
+  return toStressMapPoints(rows, { stressedOnly: false });
+}
+
 export function toStressMapPoints(
   rows: SegmentMapRow[],
   options?: { stressedOnly?: boolean },
@@ -96,6 +126,7 @@ export function toStressMapPoints(
         stress_class: row.stress_class ?? undefined,
         heatmap_url: row.heatmap_url ?? row.mask_url ?? undefined,
         gps_source: row.gps_source ?? undefined,
+        pin_kind: stressedOnly ? "stressed" : "segmented",
       },
     ];
   });

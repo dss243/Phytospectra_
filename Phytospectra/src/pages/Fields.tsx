@@ -8,7 +8,7 @@ import { useAuth } from "@/hooks/useAuth";
 import { supabase } from "@/integrations/supabase/client";
 import { Field } from "@/types/backend";
 import { Sprout, MapPin, Leaf, AlertTriangle, CheckCircle2, Pencil, Wheat, LocateFixed } from "lucide-react";
-import { getBackendBaseUrl, backendFetch } from "@/lib/backend";
+import { getBackendBaseUrl, backendFetch, backendHeaders } from "@/lib/backend";
 import { MapContainer, TileLayer, FeatureGroup } from "react-leaflet";
 import { EditControl } from "react-leaflet-draw";
 import { MapSetView, requestUserMapCenter } from "@/components/MapUserLocation";
@@ -71,7 +71,7 @@ function FieldCard({
   pending,
 }: {
   field: Field;
-  onDelete: (id: string) => void;
+  onDelete: (field: Field) => void;
   pending: boolean;
 }) {
   return (
@@ -90,11 +90,11 @@ function FieldCard({
             </div>
           </div>
           <Button
-            variant="ghost"
+            variant="outline"
             size="sm"
-            onClick={() => onDelete(field.id)}
+            onClick={() => onDelete(field)}
             disabled={pending}
-            className="opacity-0 group-hover:opacity-100 transition-opacity text-destructive hover:text-destructive hover:bg-destructive/10 h-8 px-2"
+            className="shrink-0 text-destructive border-destructive/30 hover:text-destructive hover:bg-destructive/10 h-8 px-2.5"
           >
             Delete
           </Button>
@@ -264,18 +264,30 @@ export default function Fields() {
   };
 
   // ── Delete field ─────────────────────────────────────────────────────────
-  const onDelete = async (field_id: string) => {
-    if (!window.confirm("Delete this field?")) return;
+  const onDelete = async (field: Field) => {
+    const msg =
+      `Delete "${field.field_name}"?\n\n` +
+      "This also removes its flights, drones, images, and segmentation data for this field.";
+    if (!window.confirm(msg)) return;
     setPending(true);
     setError(null);
     try {
       const token = await getTokenFromSession();
-      const res = await backendFetch(`/api/fields/${field_id}`, {
+      const res = await backendFetch(`/api/fields/${field.id}`, {
         method: "DELETE",
-        headers: { Authorization: `Bearer ${token}` },
+        headers: backendHeaders({ Authorization: `Bearer ${token}` }),
       });
-      if (!res.ok) throw new Error(await res.text());
-      setItems((prev) => prev.filter((x) => x.id !== field_id));
+      if (!res.ok) {
+        let detail = await res.text();
+        try {
+          const j = JSON.parse(detail) as { detail?: string };
+          if (j.detail) detail = j.detail;
+        } catch {
+          /* plain text error */
+        }
+        throw new Error(detail || `HTTP ${res.status}`);
+      }
+      setItems((prev) => prev.filter((x) => x.id !== field.id));
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to delete field");
     } finally {

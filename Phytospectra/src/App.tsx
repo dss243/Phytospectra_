@@ -28,6 +28,7 @@ import { Logo } from "./components/Logo.tsx";
 import Landing from "./pages/Landing.tsx";
 import { useWebSocket, StressAlertMessage } from "./hooks/useWebSocket";
 import { AuthProvider, useAuth } from "./hooks/useAuth";
+import { AlertsProvider } from "./hooks/useAlerts";
 import "leaflet/dist/leaflet.css";
 
 const queryClient = new QueryClient({
@@ -41,23 +42,15 @@ const queryClient = new QueryClient({
 });
 
 const ProtectedShell = ({
-  wsUrl,
-  setWsUrl,
   threshold,
   setThreshold,
   wsConnected,
   lastAlert,
-  unreadAlerts,
-  clearUnread,
 }: {
-  wsUrl: string;
-  setWsUrl: (s: string) => void;
   threshold: number;
   setThreshold: (n: number) => void;
   wsConnected: boolean;
   lastAlert: StressAlertMessage | null;
-  unreadAlerts: number;
-  clearUnread: () => void;
 }) => {
   const { user, role, loading } = useAuth();
   useAgronomistLocation();
@@ -76,15 +69,13 @@ const ProtectedShell = ({
   const home = "/home";
 
   return (
-    <Layout
-      wsConnected={wsConnected}
-      dbConnected={true}
-      wsUrl={wsUrl}
-      lastAlert={lastAlert}
-      unreadAlerts={unreadAlerts}
-      clearUnread={clearUnread}
-    >
-      <Routes>
+    <AlertsProvider>
+      <Layout
+        wsConnected={wsConnected}
+        dbConnected={true}
+        lastAlert={lastAlert}
+      >
+        <Routes>
         <Route path="/" element={<Navigate to={home} replace />} />
         <Route path="/home" element={<Welcome />} />
         <Route path="/live" element={<Navigate to="/home" replace />} />
@@ -105,15 +96,15 @@ const ProtectedShell = ({
         <Route path="/detections/latest" element={<LatestDetections />} />
         <Route path="/alerts" element={<Alerts />} />
         <Route path="*" element={<NotFound />} />
-      </Routes>
-    </Layout>
+        </Routes>
+      </Layout>
+    </AlertsProvider>
   );
 };
 
 const App = () => {
-  const [wsUrl, setWsUrl] = useState("");
   const [threshold, setThreshold] = useState(55);
-  const { connected, lastAlert, unreadAlerts, clearUnread } = useWebSocket(wsUrl || null);
+  const { connected, lastAlert } = useWebSocket(null);
 
   return (
     <QueryClientProvider client={queryClient}>
@@ -129,14 +120,10 @@ const App = () => {
                 path="*"
                 element={
                   <ProtectedShell
-                    wsUrl={wsUrl}
-                    setWsUrl={setWsUrl}
                     threshold={threshold}
                     setThreshold={setThreshold}
                     wsConnected={connected}
                     lastAlert={lastAlert}
-                    unreadAlerts={unreadAlerts}
-                    clearUnread={clearUnread}
                   />
                 }
               />

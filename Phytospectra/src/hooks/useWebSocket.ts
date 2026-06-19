@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import { useAuth } from "@/hooks/useAuth";
 import { useToast } from "@/hooks/use-toast";
+import { getBackendWsBaseUrl } from "@/lib/backend";
 
 // ── Message types ─────────────────────────────────────────────────────────────
 
@@ -31,33 +32,39 @@ export interface StressAlertMessage {
 
 export type WsMessage = DetectionMessage | StressAlertMessage;
 
+function buildDashboardWsUrl(token: string, overrideBase?: string | null): string {
+  const base = (overrideBase && overrideBase.trim())
+    ? overrideBase.trim().replace(/\/$/, "")
+    : `${getBackendWsBaseUrl()}/ws/dashboard`;
+  const sep = base.includes("?") ? "&" : "?";
+  return `${base}${sep}token=${encodeURIComponent(token)}`;
+}
+
 // ── Hook ──────────────────────────────────────────────────────────────────────
 
 export function useWebSocket(baseUrl: string | null) {
-  const { user } = useAuth();
+  const { session } = useAuth();
   const { toast } = useToast();
 
   const [connected, setConnected]       = useState(false);
   const [lastMessage, setLastMessage]   = useState<DetectionMessage | null>(null);
   const [lastAlert, setLastAlert]       = useState<StressAlertMessage | null>(null);
-  const [unreadAlerts, setUnreadAlerts] = useState(0);
 
   const wsRef    = useRef<WebSocket | null>(null);
   const timerRef = useRef<number | null>(null);
 
-  // Append user_id as query param so the backend can route targeted messages
-  const url = baseUrl && user?.id
-    ? `${baseUrl}${baseUrl.includes("?") ? "&" : "?"}user_id=${user.id}`
-    : baseUrl;
+  const url = useMemo(() => {
+    const token = session?.access_token;
+    if (!token) return null;
+    return buildDashboardWsUrl(token, baseUrl);
+  }, [baseUrl, session?.access_token]);
 
   const handleMessage = useCallback((raw: string) => {
     try {
       const msg: WsMessage = JSON.parse(raw);
 
-      // ── Stress alert ───────────────────────────────────────────────────────
       if (msg.type === "stress_alert") {
         setLastAlert(msg);
-        setUnreadAlerts(n => n + 1);
 
         const severityEmoji = { high: "🔴", medium: "🟡", low: "🟢" }[msg.severity] ?? "⚠️";
 
@@ -70,9 +77,7 @@ export function useWebSocket(baseUrl: string | null) {
         return;
       }
 
-      // ── Regular detection (existing behaviour) ─────────────────────────────
       setLastMessage(msg as DetectionMessage);
-
     } catch {
       // malformed frame — ignore
     }
@@ -110,7 +115,5 @@ export function useWebSocket(baseUrl: string | null) {
     };
   }, [url, handleMessage]);
 
-  const clearUnread = useCallback(() => setUnreadAlerts(0), []);
-
-  return { connected, lastMessage, lastAlert, unreadAlerts, clearUnread };
+  return { connected, lastMessage, lastAlert };
 }

@@ -1,9 +1,10 @@
-from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException
+from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException, BackgroundTasks
 from typing import Optional
 import uuid, os, logging, tempfile
 
 from core.auth import get_current_user
 from core.config import settings
+from routers.Segmentflight import auto_segment_image
 from services.supabase_service import get_supabase, save_image
 from services.calibration import extract_gps_from_exif
 
@@ -25,6 +26,7 @@ def _local_upload_path(storage_path: str) -> str:
 
 @router.post("/upload")
 async def upload_image(
+    background_tasks: BackgroundTasks,
     file:          UploadFile = File(...),
     field_id:      Optional[str] = Form(None),
     flight_id:     Optional[str] = Form(None),
@@ -86,13 +88,17 @@ async def upload_image(
                 logger.error(f"DB save failed: {e}", exc_info=True)
                 raise HTTPException(status_code=500, detail=f"DB record failed: {str(e)}")
 
+            image_id = image_row.get("id")
+            if image_id:
+                background_tasks.add_task(auto_segment_image, image_id, user_id)
+
             return {
                 "storage_path": storage_path,
                 "bucket":       settings.SUPABASE_BUCKET_RAW,
-                "image_id":     image_row.get("id"),
+                "image_id":     image_id,
                 "gps":          gps,
                 "offline":      False,
-                "message":      "Upload successful — image saved to storage for AI analysis",
+                "message":      "Upload successful — SegFormer analysis queued",
             }
 
     # ── Offline fallback (camera Wi‑Fi / no cloud) ────────────────────────

@@ -12,9 +12,10 @@ from services import supabase_service
 from services.supabase_service import FLIGHTS_ORDER_COLUMN, normalize_flight_row
 from services.gps_utils import (
     extract_gps_from_exif_strict,
-    health_bucket,
+    chart_zone_bucket,
     normalize_gps,
     point_in_boundary,
+    stress_zone_bucket,
 )
 
 logger = logging.getLogger(__name__)
@@ -97,8 +98,20 @@ async def get_flight_segmentation_points(flight_id: str, user_id: str) -> list[d
 
 async def get_field_analytics(user_id: str, field_id: str, limit_flights: int = 12) -> dict:
     client = supabase_service.get_supabase()
+    empty_zones = [
+        {"name": "Healthy", "value": 0},
+        {"name": "Mild", "value": 0},
+        {"name": "Moderate", "value": 0},
+        {"name": "Severe", "value": 0},
+        {"name": "Not analyzed", "value": 0},
+    ]
     if not client:
-        return {"trends": [], "stress_by_flight": [], "summary": {}}
+        return {
+            "trends": [],
+            "stress_by_flight": [],
+            "zone_distribution": empty_zones,
+            "summary": {},
+        }
 
     flights_res = (
         client.table("flights")
@@ -112,6 +125,14 @@ async def get_field_analytics(user_id: str, field_id: str, limit_flights: int = 
     flights = [normalize_flight_row(f) for f in reversed(flights_res.data or [])]
 
     segs = await supabase_service.get_segmentations(user_id=user_id, field_id=field_id, limit=2000)
+    images = await supabase_service.get_images(user_id=user_id, field_id=field_id, limit=2000)
+
+    images_by_flight: dict[str, list] = {}
+    for img in images:
+        fid = img.get("flight_id")
+        if fid:
+            images_by_flight.setdefault(fid, []).append(img)
+
     by_flight: dict[str, list] = {}
     for s in segs:
         fid = s.get("flight_id")
@@ -124,32 +145,76 @@ async def get_field_analytics(user_id: str, field_id: str, limit_flights: int = 
 
     for fl in flights:
         fid = fl["id"]
+        flight_images = images_by_flight.get(fid, [])
         latest = _latest_segmentation_per_image(by_flight.get(fid, []))
-        scores = [x.get("health_score") for x in latest.values() if x.get("health_score") is not None]
-        if not scores:
-            continue
-        avg = round(sum(scores) / len(scores), 1)
-        all_scores.extend(scores)
-        date_label = (fl.get("flight_date") or "")[:10] or fid[:8]
-        trends.append({"date": date_label, "health": avg, "flight_id": fid, "images": len(scores)})
+        analyzed_ids = set(latest.keys())
 
-        buckets = {"healthy": 0, "mild": 0, "moderate": 0, "severe": 0}
+        buckets = {"healthy": 0, "mild": 0, "moderate": 0, "severe": 0, "not_analyzed": 0}
         for seg in latest.values():
-            b = health_bucket(seg.get("health_score"))
+            b = chart_zone_bucket(seg.get("health_score"), seg.get("stress_class"))
             if b in buckets:
                 buckets[b] += 1
-        stress_by_flight.append({
-            "flight": date_label,
-            "flight_id": fid,
-            **buckets,
-        })
+        buckets["not_analyzed"] = sum(
+            1 for img in flight_images if img.get("id") not in analyzed_ids
+        )
+
+        scores = [
+            x.get("health_score")
+            for x in latest.values()
+            if x.get("health_score") is not None
+        ]
+        date_label = (fl.get("flight_date") or "")[:10] or fid[:8]
+
+        if scores:
+            avg = round(sum(scores) / len(scores), 1)
+            all_scores.extend(scores)
+            trends.append({
+                "date": date_label,
+                "health": avg,
+                "flight_id": fid,
+                "images": len(flight_images) or len(latest),
+                "analyzed": len(latest),
+            })
+
+        if latest or flight_images:
+            stress_by_flight.append({
+                "flight": date_label,
+                "flight_id": fid,
+                **buckets,
+            })
 
     summary = {
         "avg_health": round(sum(all_scores) / len(all_scores), 1) if all_scores else None,
         "total_images_analyzed": len(all_scores),
+        "total_images_uploaded": len(images),
         "flights_with_data": len(trends),
     }
-    return {"trends": trends, "stress_by_flight": stress_by_flight, "summary": summary}
+
+    by_image = _latest_segmentation_per_image(segs)
+    segmented_ids = set(by_image.keys())
+    zone_buckets = {"healthy": 0, "mild": 0, "moderate": 0, "severe": 0, "not_analyzed": 0}
+    for seg in by_image.values():
+        b = chart_zone_bucket(seg.get("health_score"), seg.get("stress_class"))
+        if b in zone_buckets:
+            zone_buckets[b] += 1
+    zone_buckets["not_analyzed"] = sum(
+        1 for img in images if img.get("id") not in segmented_ids
+    )
+
+    zone_distribution = [
+        {"name": "Healthy", "value": zone_buckets["healthy"]},
+        {"name": "Mild", "value": zone_buckets["mild"]},
+        {"name": "Moderate", "value": zone_buckets["moderate"]},
+        {"name": "Severe", "value": zone_buckets["severe"]},
+        {"name": "Not analyzed", "value": zone_buckets["not_analyzed"]},
+    ]
+
+    return {
+        "trends": trends,
+        "stress_by_flight": stress_by_flight,
+        "zone_distribution": zone_distribution,
+        "summary": summary,
+    }
 
 
 async def get_field_stress_map_data(user_id: str, field_id: str) -> dict | None:
@@ -173,22 +238,31 @@ async def get_field_stress_map_data(user_id: str, field_id: str) -> dict | None:
     segs = await supabase_service.get_segmentations(
         user_id=user_id, field_id=field_id, limit=2000,
     )
+    images = await supabase_service.get_images(
+        user_id=user_id, field_id=field_id, limit=2000,
+    )
     by_image = _latest_segmentation_per_image(segs)
     image_ids = list(by_image.keys())
 
     gps_by_image: dict[str, dict] = {}
-    if image_ids:
+    all_image_ids = {img.get("id") for img in images if img.get("id")}
+    all_image_ids.update(image_ids)
+    if all_image_ids:
         try:
             img_res = (
                 client.table("images")
-                .select("id, gps")
-                .in_("id", image_ids)
+                .select("id, gps, gps_source, upload_source")
+                .in_("id", list(all_image_ids))
                 .execute()
             )
             for img in img_res.data or []:
                 g = normalize_gps(img.get("gps"))
                 if g:
-                    gps_by_image[img["id"]] = g
+                    gps_by_image[img["id"]] = {
+                        "gps": g,
+                        "gps_source": img.get("gps_source"),
+                        "upload_source": img.get("upload_source"),
+                    }
         except Exception as e:
             logger.warning("stress-map image GPS lookup failed: %s", e)
 
@@ -196,29 +270,54 @@ async def get_field_stress_map_data(user_id: str, field_id: str) -> dict | None:
         {"lat": field.get("latitude"), "lng": field.get("longitude")},
     )
 
-    points: list[dict] = []
+    segmentation_points: list[dict] = []
+    segmented_ids: set[str] = set()
     for image_id, seg in by_image.items():
         img = seg.get("images") if isinstance(seg.get("images"), dict) else {}
         gps = None
         gps_source = "missing"
+        meta = gps_by_image.get(image_id) or {}
         seg_gps = normalize_gps(seg.get("gps"))
-        img_gps = gps_by_image.get(image_id) or normalize_gps(img.get("gps"))
+        img_gps = meta.get("gps") or normalize_gps(img.get("gps"))
         if seg_gps:
             gps = seg_gps
             gps_source = "segmentation"
         elif img_gps:
             gps = img_gps
-            gps_source = "image"
-        points.append({
+            gps_source = meta.get("gps_source") or "image"
+        if not gps:
+            continue
+        segmented_ids.add(image_id)
+        segmentation_points.append({
             "image_id": image_id,
-            "lat": gps["lat"] if gps else None,
-            "lng": gps["lng"] if gps else None,
+            "lat": gps["lat"],
+            "lng": gps["lng"],
             "gps_source": gps_source,
             "health_score": seg.get("health_score"),
             "stress_class": seg.get("stress_class"),
             "confidence": seg.get("confidence"),
             "flight_id": seg.get("flight_id"),
             "model": _model_source(seg),
+            "pin_kind": "segmented",
+        })
+
+    uploaded_points: list[dict] = []
+    for img in images:
+        iid = img.get("id")
+        if not iid or iid in segmented_ids:
+            continue
+        meta = gps_by_image.get(iid) or {}
+        gps = meta.get("gps") or normalize_gps(img.get("gps"))
+        if not gps:
+            continue
+        uploaded_points.append({
+            "image_id": iid,
+            "lat": gps["lat"],
+            "lng": gps["lng"],
+            "gps_source": meta.get("gps_source") or img.get("gps_source") or "upload",
+            "upload_source": meta.get("upload_source") or img.get("upload_source"),
+            "flight_id": img.get("flight_id"),
+            "pin_kind": "uploaded",
         })
 
     return {
@@ -230,8 +329,10 @@ async def get_field_stress_map_data(user_id: str, field_id: str) -> dict | None:
             "boundary": field.get("boundary"),
         },
         "field_gps": field_gps,
-        "points": points,
-        "count": len(points),
+        "points": segmentation_points,
+        "uploaded_points": uploaded_points,
+        "count": len(segmentation_points),
+        "uploaded_count": len(uploaded_points),
     }
 
 

@@ -1,9 +1,12 @@
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from typing import Optional
+import logging
 from core.auth import get_current_user
 from services import supabase_service
-from routers.flight_insights import get_field_stress_map_data
+from routers.flight_insights import get_field_stress_map_data, get_field_analytics
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Fields"])
 
@@ -67,12 +70,36 @@ async def field_stress_map(field_id: str, user=Depends(get_current_user)):
     return data
 
 
+@router.get("/fields/{field_id}/analytics")
+async def field_analytics(field_id: str, user=Depends(get_current_user)):
+    """Health trends, zone distribution, and stress breakdown from real segmentations."""
+    client = supabase_service.get_supabase()
+    if not client:
+        raise HTTPException(status_code=503, detail="Supabase not available")
+
+    exists = (
+        client.table("fields")
+        .select("id")
+        .eq("id", field_id)
+        .eq("user_id", user["sub"])
+        .limit(1)
+        .execute()
+    )
+    if not exists.data:
+        raise HTTPException(status_code=404, detail="Field not found")
+
+    return await get_field_analytics(user["sub"], field_id)
+
+
 @router.delete("/fields/{field_id}")
 async def delete_field(field_id: str, user=Depends(get_current_user)):
-    client = supabase_service.get_supabase()
-    result = client.table("fields").delete()\
-        .eq("id", field_id)\
-        .eq("user_id", user["sub"])\
-        .execute()
-
-    return {"status": "deleted", "field_id": field_id}
+    try:
+        result = await supabase_service.delete_field_cascade(user["sub"], field_id)
+        return {"status": "deleted", **result}
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
+    except Exception as e:
+        logger.exception("delete_field failed field_id=%s", field_id)
+        raise HTTPException(status_code=500, detail=f"Failed to delete field: {e}") from e

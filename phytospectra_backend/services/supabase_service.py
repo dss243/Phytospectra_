@@ -88,6 +88,11 @@ async def upload_image(file_path: str, bucket: str, storage_path: str) -> str:
 
 async def download_image(object_path: str, bucket: str, dest_path: str) -> str:
     """Download a file from Supabase Storage to dest_path. Raises on failure."""
+    return download_image_sync(object_path, bucket, dest_path)
+
+
+def download_image_sync(object_path: str, bucket: str, dest_path: str) -> str:
+    """Blocking download — use via asyncio.to_thread from async routes."""
     client = get_supabase()
     if not client:
         raise RuntimeError("Supabase client not available")
@@ -97,7 +102,10 @@ async def download_image(object_path: str, bucket: str, dest_path: str) -> str:
     try:
         data = client.storage.from_(bucket).download(object_path)
     except Exception as e:
-        logger.error(f"Storage download FAILED | bucket={bucket} | path={object_path} | error={e}")
+        logger.error(
+            "Storage download FAILED | bucket=%s | path=%s | error=%s",
+            bucket, object_path, e,
+        )
         raise RuntimeError(f"Storage download failed: {e}") from e
 
     if not data:
@@ -108,7 +116,10 @@ async def download_image(object_path: str, bucket: str, dest_path: str) -> str:
     with open(dest_path, "wb") as f:
         f.write(data)
 
-    logger.info(f"Downloaded | bucket={bucket} | path={object_path} | dest={dest_path} | {len(data)} bytes")
+    logger.info(
+        "Downloaded | bucket=%s | path=%s | dest=%s | %d bytes",
+        bucket, object_path, dest_path, len(data),
+    )
     return dest_path
 
 
@@ -341,7 +352,7 @@ def attach_segmentation_mask_urls(rows: list) -> list:
 
 async def save_segmentation(record: dict) -> dict:
     """
-    Insert a segmentation result.
+    Insert a segmentation result (replaces prior rows for the same image_id).
     Raises on failure so the caller knows the record was NOT saved.
     """
     client = get_supabase()
@@ -356,7 +367,15 @@ async def save_segmentation(record: dict) -> dict:
             "this usually means the mask upload failed. Fix the upload first."
         )
 
+    image_id = record.get("image_id")
+    user_id = record.get("user_id")
+
     try:
+        if image_id and user_id:
+            client.table("segmentations").delete().eq(
+                "image_id", image_id
+            ).eq("user_id", user_id).execute()
+
         result = client.table("segmentations").insert({
             "user_id":               record["user_id"],
             "image_id":              record["image_id"],
@@ -456,6 +475,13 @@ async def get_flight_segmentation_rows(
     )
     rows_by_image: dict[str, dict] = {}
 
+    def _merge_latest(rows: list[dict] | None) -> None:
+        """Keep newest row per image_id (query ordered by processed_at desc)."""
+        for row in rows or []:
+            iid = row.get("image_id")
+            if iid and iid not in rows_by_image:
+                rows_by_image[iid] = row
+
     try:
         res = (
             client.table("segmentations")
@@ -465,8 +491,7 @@ async def get_flight_segmentation_rows(
             .limit(limit)
             .execute()
         )
-        for row in res.data or []:
-            rows_by_image[row["image_id"]] = row
+        _merge_latest(res.data)
     except Exception as e:
         logger.warning("segmentations by flight_id=%s failed: %s", flight_id, e)
 
@@ -480,9 +505,7 @@ async def get_flight_segmentation_rows(
                 .limit(limit)
                 .execute()
             )
-            for row in res.data or []:
-                if row["image_id"] not in rows_by_image:
-                    rows_by_image[row["image_id"]] = row
+            _merge_latest(res.data)
         except Exception as e:
             logger.warning(
                 "segmentations by image_ids for flight %s failed: %s", flight_id, e
@@ -516,8 +539,13 @@ async def create_flight(
         }).execute()
         row = result.data[0] if result.data else {}
         if row and row.get("id"):
-            ok = set_esp32_active_flight(client, user_id, drone_id, row["id"])
+            ok, err = set_esp32_active_flight(client, user_id, drone_id, row["id"])
             row["esp32_active"] = ok
+            if not ok:
+                logger.info(
+                    "Flight created; ESP32 will use newest flight automatically (%s)",
+                    err or "registry optional",
+                )
         return row
     except Exception as e:
         logger.error(f"Failed to create flight: {e}", exc_info=True)
@@ -582,30 +610,180 @@ def get_esp32_active_flight_id(client, device_id: str) -> Optional[str]:
     return None
 
 
-def set_esp32_active_flight(client, user_id: str, drone_id: str, flight_id: str) -> bool:
+def get_latest_flight_for_esp32(client, user_id: str, device_id: str) -> Optional[dict]:
+    """Newest flight for one farmer (optionally scoped to ESP32-linked drone rows)."""
+    drone_res = (
+        client.table("drones")
+        .select("id")
+        .eq("esp32_device_id", device_id)
+        .eq("user_id", user_id)
+        .execute()
+    )
+    esp32_drone_ids = [d["id"] for d in (drone_res.data or [])]
+
+    select_variants = [
+        "id, field_id, drone_id, created_at, fields(field_name)",
+        "id, field_id, drone_id, created_at",
+        "id, field_id, drone_id",
+        "*",
+    ]
+    order_cols = (FLIGHTS_ORDER_COLUMN, "id", None)
+
+    for drone_ids in (esp32_drone_ids, None):
+        for sel in select_variants:
+            for order_col in order_cols:
+                try:
+                    q = client.table("flights").select(sel).eq("user_id", user_id).limit(1)
+                    if order_col:
+                        q = q.order(order_col, desc=True)
+                    if drone_ids is not None:
+                        if not drone_ids:
+                            continue
+                        q = q.in_("drone_id", drone_ids)
+                    res = q.execute()
+                    if res.data:
+                        return res.data[0]
+                except Exception as e:
+                    logger.warning(
+                        "latest esp32 flight lookup failed user=%s sel=%r order=%s: %s",
+                        user_id,
+                        sel,
+                        order_col,
+                        e,
+                    )
+    return None
+
+
+def pick_user_and_flight_for_esp32_device(client, device_id: str) -> tuple[Optional[str], Optional[dict], list]:
+    """
+    One physical ESP32 may appear on multiple drone rows (even across accounts).
+    Use the account that actually has flights — newest flight wins.
+    """
+    drone_res = (
+        client.table("drones")
+        .select("id, user_id, field_id, esp32_device_id, drone_name")
+        .eq("esp32_device_id", device_id.strip())
+        .execute()
+    )
+    esp32_drones = drone_res.data or []
+    if not esp32_drones:
+        return None, None, []
+
+    seen_users: set[str] = set()
+    best_flight = None
+    best_user = None
+
+    for drone in esp32_drones:
+        uid = drone.get("user_id")
+        if not uid or uid in seen_users:
+            continue
+        seen_users.add(uid)
+        cand = get_latest_flight_for_esp32(client, uid, device_id)
+        if not cand:
+            continue
+        if not best_flight or _flight_is_newer(cand, best_flight):
+            best_flight = cand
+            best_user = uid
+
+    if len(seen_users) > 1:
+        logger.warning(
+            "ESP32 device_id=%s linked to %d accounts — using user=%s (newest flight)",
+            device_id,
+            len(seen_users),
+            best_user,
+        )
+
+    return best_user, best_flight, esp32_drones
+
+
+def _flight_row_by_id(client, flight_id: str, user_id: str) -> Optional[dict]:
+    try:
+        res = (
+            client.table("flights")
+            .select("id, field_id, drone_id, created_at, fields(field_name)")
+            .eq("id", flight_id)
+            .eq("user_id", user_id)
+            .limit(1)
+            .execute()
+        )
+        if res.data:
+            return res.data[0]
+    except Exception as e:
+        logger.warning("flight lookup failed id=%s: %s", flight_id, e)
+    return None
+
+
+def _flight_is_newer(candidate: dict, other: dict) -> bool:
+    c_ts = candidate.get("created_at") or ""
+    o_ts = other.get("created_at") or ""
+    if c_ts and o_ts:
+        return c_ts > o_ts
+    return str(candidate.get("id", "")) > str(other.get("id", ""))
+
+
+def resolve_esp32_active_flight(
+    client, user_id: str, device_id: str, *, auto_persist: bool = True
+) -> Optional[dict]:
+    """
+    ESP32 upload target: newest flight by default (automatic).
+    A pinned flight is kept only while it is still the newest; creating a newer
+    flight switches uploads automatically.
+    """
+    latest = get_latest_flight_for_esp32(client, user_id, device_id)
+    pinned_id = get_esp32_active_flight_id(client, device_id)
+    row = latest
+
+    if pinned_id and latest and pinned_id != latest.get("id"):
+        pinned = _flight_row_by_id(client, pinned_id, user_id)
+        if pinned and not _flight_is_newer(latest, pinned):
+            row = pinned
+
+    if not row and pinned_id:
+        row = _flight_row_by_id(client, pinned_id, user_id)
+
+    if row and auto_persist and latest and row.get("id") == latest.get("id"):
+        ok, _err = set_esp32_active_flight(
+            client, user_id, row.get("drone_id"), row["id"]
+        )
+        if ok:
+            logger.info(
+                "ESP32 auto-active newest flight device=%s flight=%s",
+                device_id,
+                row["id"],
+            )
+
+    return row
+
+
+def set_esp32_active_flight(client, user_id: str, drone_id: str, flight_id: str) -> tuple[bool, str]:
     """
     Mark flight active for the shared ESP32 (all drone rows use the same esp32_device_id).
-    Returns True if the registry was updated.
+    Returns (success, error_message).
     """
     device_id = resolve_esp32_device_id(client, user_id, drone_id)
     if not device_id:
-        logger.warning(
-            "No esp32_device_id for user %s — set esp32-mapir-01 on your drones",
-            user_id,
-        )
-        return False
+        msg = "No esp32_device_id on your drones — set esp32-mapir-01 on the Drones page"
+        logger.warning("%s (user=%s)", msg, user_id)
+        return False, msg
 
     registry_ok = False
     drones_ok = False
+    registry_err = ""
+    drones_err = ""
+
     try:
-        client.table("esp32_active_missions").upsert({
-            "device_id": device_id,
-            "user_id": user_id,
-            "flight_id": flight_id,
-        }).execute()
+        client.table("esp32_active_missions").upsert(
+            {
+                "device_id": device_id,
+                "user_id": user_id,
+                "flight_id": flight_id,
+            },
+            on_conflict="device_id",
+        ).execute()
         registry_ok = True
         logger.info("ESP32 active mission device=%s flight=%s", device_id, flight_id)
     except Exception as e:
+        registry_err = str(e)
         logger.error(
             "esp32_active_missions upsert failed — run Supabase migration SQL: %s",
             e,
@@ -617,9 +795,18 @@ def set_esp32_active_flight(client, user_id: str, drone_id: str, flight_id: str)
         ).eq("user_id", user_id).execute()
         drones_ok = True
     except Exception as e:
+        drones_err = str(e)
         logger.warning("drones.active_flight_id update failed: %s", e)
 
-    return registry_ok or drones_ok
+    if registry_ok or drones_ok:
+        return True, ""
+
+    hint = (
+        "Database table missing — open Supabase → SQL Editor and run "
+        "Phytospectra/supabase/migrations/20260613180000_esp32_active_flight.sql"
+    )
+    detail = registry_err or drones_err or "unknown error"
+    return False, f"{hint} ({detail})"
 
 
 async def get_flights(user_id: str, field_id: str = None) -> list:
@@ -679,7 +866,84 @@ async def get_fields(user_id: str) -> list:
 
     raise RuntimeError(f"Could not load fields from Supabase: {last_error}")
 
-async def get_conversation(conversation_id: str, user_id: str):
+
+async def delete_field_cascade(user_id: str, field_id: str) -> dict:
+    """
+    Delete a field and dependent rows that block the FK (service_role client).
+    Removes segmentations, images, flights, drones, and alerts for this field.
+    """
+    client = get_supabase()
+    if not client:
+        raise RuntimeError("Supabase client not available")
+
+    field_res = (
+        client.table("fields")
+        .select("id, field_name")
+        .eq("id", field_id)
+        .eq("user_id", user_id)
+        .limit(1)
+        .execute()
+    )
+    if not field_res.data:
+        raise ValueError("Field not found")
+
+    field_name = field_res.data[0].get("field_name") or field_id
+    removed: dict[str, int] = {}
+
+    def _delete_count(table: str, **eq_filters) -> int:
+        q = client.table(table).delete()
+        for col, val in eq_filters.items():
+            q = q.eq(col, val)
+        res = q.execute()
+        return len(res.data) if res.data else 0
+
+    for table in ("segmentations", "images", "flights"):
+        try:
+            removed[table] = _delete_count(table, field_id=field_id, user_id=user_id)
+        except Exception as e:
+            logger.warning("delete_field %s failed for %s: %s", table, field_id, e)
+            raise RuntimeError(
+                f"Could not remove linked {table} — delete flights/images first or contact support"
+            ) from e
+
+    try:
+        removed["drones"] = _delete_count("drones", field_id=field_id, user_id=user_id)
+    except Exception as e:
+        logger.warning("delete_field drones failed for %s: %s", field_id, e)
+        raise RuntimeError("Could not remove drones linked to this field") from e
+
+    try:
+        removed["alerts"] = _delete_count("alerts", field_id=field_id)
+    except Exception as e:
+        logger.warning("delete_field alerts failed for %s: %s", field_id, e)
+        removed["alerts"] = 0
+
+    try:
+        del_res = (
+            client.table("fields")
+            .delete()
+            .eq("id", field_id)
+            .eq("user_id", user_id)
+            .execute()
+        )
+    except Exception as e:
+        logger.error("delete_field final step failed for %s: %s", field_id, e)
+        raise RuntimeError(
+            "Field still has linked data in the database. "
+            "Remove flights and drones for this field, then try again."
+        ) from e
+
+    if not del_res.data:
+        raise RuntimeError("Field was not deleted — it may not exist or access was denied")
+
+    logger.info(
+        "Deleted field %s (%s): %s",
+        field_name,
+        field_id,
+        removed,
+    )
+    return {"field_id": field_id, "field_name": field_name, "removed": removed}
+
     client = get_supabase()
     
     # Log what we're searching for

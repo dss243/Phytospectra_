@@ -1,10 +1,13 @@
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from typing import Optional
+import asyncio
+import logging
+
 from core.connection_manager import manager
 from services.supabase_service import get_supabase
+from services.email_service import notify_stress_alert_emails
 from core.auth import get_current_user
-import logging
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -96,13 +99,21 @@ async def send_stress_alert(payload: StressAlertPayload):
     if payload.message:
         auto_message = payload.message
     elif agronomist_id:
+        stressed_note = ""
+        if payload.health_score <= 70:
+            stressed_note = f" (~{100 - payload.health_score:.0f}% stressed)"
         auto_message = (
-            f"⚠️ Crop stress detected — health score {payload.health_score:.0f}%. "
+            f"⚠️ Crop stress detected — health score {payload.health_score:.0f}%"
+            f"{stressed_note}. "
             f"Nearest agronomist ({agro_name}, {agro_dist_km:.1f} km) has been notified."
         )
     else:
+        stressed_note = ""
+        if payload.health_score <= 70:
+            stressed_note = f" (~{100 - payload.health_score:.0f}% stressed)"
         auto_message = (
-            f"⚠️ Crop stress detected — health score {payload.health_score:.0f}%. "
+            f"⚠️ Crop stress detected — health score {payload.health_score:.0f}%"
+            f"{stressed_note}. "
             "No agronomist currently available nearby."
         )
 
@@ -160,12 +171,29 @@ async def send_stress_alert(payload: StressAlertPayload):
         alert_id, farmer_reached, agro_reached
     )
 
+    # ── Email farmer + agronomist (phytospectra@gmail.com via Gmail SMTP) ───
+    emailed = await asyncio.to_thread(
+        notify_stress_alert_emails,
+        supabase,
+        farmer_id=payload.farmer_id,
+        agronomist_id=agronomist_id,
+        field_id=payload.field_id,
+        health_score=payload.health_score,
+        severity=payload.severity,
+        message=auto_message,
+        lat=payload.lat,
+        lng=payload.lng,
+    )
+    if emailed:
+        logger.info("Alert %s emailed to: %s", alert_id, ", ".join(emailed))
+
     return {
         "alert_id":       alert_id,
         "agronomist_id":  agronomist_id,
         "message":        auto_message,
         "farmer_reached": farmer_reached,
         "agro_reached":   agro_reached,
+        "emailed_to":     emailed,
     }
 
 

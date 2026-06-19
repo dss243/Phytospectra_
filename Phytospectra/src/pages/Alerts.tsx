@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { PageHeader } from "@/components/PageHeader";
 import { useAlerts, StressAlert } from "@/hooks/useAlerts";
+import { acknowledgeAlertIds } from "@/lib/alertAck";
 import {
   AlertCircle, Info, BellRing,
   Clock, MapPin, Wifi, Inbox,
@@ -60,6 +61,12 @@ function AlertRow({ alert }: { alert: StressAlert }) {
 export default function Alerts() {
   const { alerts, loading } = useAlerts();
   const [filter, setFilter] = useState<Severity>("all");
+
+  useEffect(() => {
+    if (!loading) {
+      acknowledgeAlertIds(alerts);
+    }
+  }, [loading, alerts]);
 
   const counts = {
     all:    alerts.length,

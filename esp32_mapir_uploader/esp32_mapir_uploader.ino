@@ -4,13 +4,26 @@
  * Flash layout — use esp32_mapir_uploader/partitions.csv (4 MB flash):
  *   nvs,      data, nvs,     0x9000,  0x5000,
  *   otadata,  data, ota,     0xe000,  0x2000,
- *   app0,     app,  ota_0,   0x10000, 0x150000,
- *   spiffs,   data, spiffs,  0x160000,0x2A0000,   ← temp photos (~2.6 MB)
+ *   app0,     app,  ota_0,   0x10000, 0x100000,
+ *   spiffs,   data, spiffs,  0x110000,0x2F0000,   ← temp photos (~3 MB)
+ *
+ * CHANGED vs original: app0 shrunk from 0x150000 (1.31MB) to 0x100000 (1MB)
+ * to give the storage partition room to grow from 2.6MB to 3MB. This sketch
+ * (WiFi + HTTPClient, no TLS, no OLED/graphics libs) should fit comfortably
+ * under 1MB — verify the "Sketch uses ... bytes" line after compiling. If
+ * it doesn't fit, bump app0 back up in small steps and shrink spiffs to match
+ * (keep spiffs start = app0 end, and spiffs end at 0x400000).
  *
  * Arduino IDE: Tools → Flash Size → 4MB, Partition Scheme → Custom partition table
  * (partitions.csv in this sketch folder).
  *
- * The spiffs partition is mounted with SPIFFS (label "spiffs").
+ * Storage partition is mounted with LittleFS, not SPIFFS. SPIFFS does lazy
+ * garbage collection and was failing to fully reclaim space from deleted
+ * temp files once images got close to the partition's total size — "free"
+ * space would drift down over repeated download/delete cycles even with
+ * nothing left on disk. LittleFS handles near-capacity churn much more
+ * reliably. The partition's on-flash "spiffs" subtype name is just a label
+ * in the partition table; LittleFS works fine on a partition typed "spiffs".
  *
  * Backend: uvicorn main:app --host 0.0.0.0 --port 8000
  * Set BACKEND_HOST to your PC LAN IP (ipconfig).
@@ -19,7 +32,7 @@
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <FS.h>
-#include <SPIFFS.h>
+#include <LittleFS.h>
 #include <cstring>
 
 // ── Network credentials ────────────────────────────────────────────────────
@@ -27,7 +40,7 @@ const char* CAM_SSID  = "MAPIR-S3WRGN-dbddbe";
 const char* CAM_PASS  = "12345678";
 const char* CAM_IP    = "192.168.1.254";
 
-const char* HOME_SSID = "dsds";
+const char* HOME_SSID = "Wifi_network";
 const char* HOME_PASS = "0798200237";
 
 // ── Backend ────────────────────────────────────────────────────────────────
@@ -40,10 +53,15 @@ const char* DEVICE_ID     = "esp32-mapir-01";
 const char* ESP32_API_KEY = "esp32-dev-key";
 const char* FW_VERSION    = "2026-06-18-fix5";
 
-// Must match partitions.csv — spiffs row size 0x2A0000
+// Must match partitions.csv — spiffs row size 0x2F0000
 #define STORAGE_PARTITION_LABEL "spiffs"
-#define STORAGE_PARTITION_BYTES 0x2A0000UL
-#define FS_RESERVE              16384UL
+#define STORAGE_PARTITION_BYTES 0x2F0000UL
+// LittleFS needs real headroom to do its own bookkeeping reliably when
+// files are large relative to the partition. 16KB (the old SPIFFS reserve)
+// was far too thin for a partition that's ~93% filled by one image; this
+// keeps a safety margin so a near-max-size capture still leaves room for
+// filesystem metadata instead of reporting "full" before it should.
+#define FS_RESERVE              196608UL  // 192 KB
 
 // ── Tuning ─────────────────────────────────────────────────────────────────
 #define CHUNK_SIZE      8192
@@ -130,13 +148,13 @@ String localTmpPath(const String& fname) {
 }
 
 size_t storageFreeBytes() {
-  return SPIFFS.totalBytes() - SPIFFS.usedBytes();
+  return LittleFS.totalBytes() - LittleFS.usedBytes();
 }
 
 void printStorageSpace() {
   Serial.printf("spiffs partition: %u / %u KB free (max 1 image ~%u KB)\n",
     (unsigned)(storageFreeBytes() / 1024),
-    (unsigned)(SPIFFS.totalBytes() / 1024),
+    (unsigned)(LittleFS.totalBytes() / 1024),
     (unsigned)(MAX_IMAGE_SIZE / 1024));
 }
 
@@ -447,16 +465,36 @@ bool downloadImage(const char* filename, const char* savePath) {
 
   size_t freeSp = storageFreeBytes();
   if (contentLength > 0 && (size_t)contentLength + FS_RESERVE > freeSp) {
-    Serial.printf("spiffs full: need %d KB, free %u KB\n",
+    Serial.printf("storage full: need %d KB, free %u KB — formatting and retrying once\n",
       contentLength / 1024, (unsigned)(freeSp / 1024));
+    // LittleFS is far better than SPIFFS at reclaiming deleted-file space,
+    // but if something still drifted (crash mid-cycle, orphaned temp file,
+    // etc.) a full reformat is cheap insurance — there's nothing on this
+    // partition we need to keep between sync cycles.
     closeHttp(http, client);
-    return false;
+    LittleFS.format();
+    LittleFS.begin(false, "/spiffs", 10, STORAGE_PARTITION_LABEL);
+    freeSp = storageFreeBytes();
+    Serial.printf("  after format: %u KB free\n", (unsigned)(freeSp / 1024));
+    if ((size_t)contentLength + FS_RESERVE > freeSp) {
+      Serial.println("  still won't fit — skipping this file");
+      return false;
+    }
+    // Re-fetch the image since the first HTTP connection was closed above.
+    http.begin(client, CAM_IP, 80, camPath);
+    http.setTimeout(HTTP_TIMEOUT);
+    int retryCode = http.GET();
+    if (retryCode != HTTP_CODE_OK) {
+      Serial.printf("Re-download HTTP %d: %s\n", retryCode, filename);
+      closeHttp(http, client);
+      return false;
+    }
   }
 
-  if (SPIFFS.exists(savePath)) SPIFFS.remove(savePath);
-  File file = SPIFFS.open(savePath, FILE_WRITE);
+  if (LittleFS.exists(savePath)) LittleFS.remove(savePath);
+  File file = LittleFS.open(savePath, FILE_WRITE);
   if (!file) {
-    Serial.println("SPIFFS open() failed for write");
+    Serial.println("LittleFS open() failed for write");
     closeHttp(http, client);
     return false;
   }
@@ -488,7 +526,7 @@ bool downloadImage(const char* filename, const char* savePath) {
           Serial.println("Download exceeded MAX_IMAGE_SIZE, aborting");
           file.close();
           closeHttp(http, client);
-          SPIFFS.remove(savePath);
+          LittleFS.remove(savePath);
           return false;
         }
       }
@@ -504,12 +542,12 @@ bool downloadImage(const char* filename, const char* savePath) {
 
   if (contentLength > 0 && downloaded != contentLength) {
     Serial.printf("Download incomplete %s (%d/%d bytes)\n", filename, downloaded, contentLength);
-    SPIFFS.remove(savePath);
+    LittleFS.remove(savePath);
     return false;
   }
   if (downloaded == 0) {
     Serial.printf("Download produced 0 bytes: %s\n", filename);
-    SPIFFS.remove(savePath);
+    LittleFS.remove(savePath);
     return false;
   }
 
@@ -534,7 +572,7 @@ void deleteCameraImage(const String& filename) {
 // ══════════════════════════════════════════════════════════════════════════
 
 bool uploadViaBackend(const char* filepath, const char* filename) {
-  File file = SPIFFS.open(filepath, FILE_READ);
+  File file = LittleFS.open(filepath, FILE_READ);
   if (!file || file.size() == 0) {
     if (file) file.close();
     Serial.printf("Cannot open for upload: %s\n", filepath);
@@ -662,17 +700,17 @@ void processAllImages() {
 
     // 3b. Switch back home to upload
     if (!connectToHomeWiFi()) {
-      SPIFFS.remove(tmpPath.c_str());
+      LittleFS.remove(tmpPath.c_str());
       continue;
     }
 
     if (!uploadViaBackend(tmpPath.c_str(), fname.c_str())) {
-      SPIFFS.remove(tmpPath.c_str());
+      LittleFS.remove(tmpPath.c_str());
       connectToCamera(); // restore camera connection for next iteration
       continue;
     }
 
-    SPIFFS.remove(tmpPath.c_str());
+    LittleFS.remove(tmpPath.c_str());
     successCount++;
 
     // 3c. Delete from camera after confirmed upload
@@ -715,14 +753,14 @@ void setup() {
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);
 
-  // Mount spiffs partition from partitions.csv (0x2A0000 bytes)
-  if (!SPIFFS.begin(true, "/spiffs", 10, STORAGE_PARTITION_LABEL)) {
-    Serial.printf("FATAL: cannot mount SPIFFS partition '%s' — use partitions.csv + 4MB flash\n",
+  // Mount spiffs partition from partitions.csv (0x2F0000 bytes)
+  if (!LittleFS.begin(true, "/spiffs", 10, STORAGE_PARTITION_LABEL)) {
+    Serial.printf("FATAL: cannot mount LittleFS partition '%s' — use partitions.csv + 4MB flash\n",
       STORAGE_PARTITION_LABEL);
     return;
   }
 
-  const size_t total = SPIFFS.totalBytes();
+  const size_t total = LittleFS.totalBytes();
   if (total < STORAGE_PARTITION_BYTES / 2) {
     Serial.printf("WARN: spiffs only %u KB — expected ~%u KB from partitions.csv\n",
       (unsigned)(total / 1024), (unsigned)(STORAGE_PARTITION_BYTES / 1024));

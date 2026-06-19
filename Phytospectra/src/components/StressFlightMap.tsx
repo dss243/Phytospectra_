@@ -12,6 +12,8 @@ export type StressMapPoint = {
   model?: string;
   storage_path?: string | null;
   gps_source?: string | null;
+  pin_kind?: "stressed" | "segmented" | "uploaded";
+  upload_source?: string | null;
 };
 
 function healthColor(score: number | null | undefined): string {
@@ -77,12 +79,15 @@ export function StressFlightMap({
   center,
   selectedId,
   onSelect,
+  variant = "stress",
 }: {
   points: StressMapPoint[];
   boundary?: object | null;
   center?: { lat?: number | null; lng?: number | null };
   selectedId?: string | null;
   onSelect?: (p: StressMapPoint) => void;
+  /** stress = moderate/severe pins only (default legend); health = all tiers */
+  variant?: "stress" | "health";
 }) {
   const defaultCenter: LatLngTuple = [
     center?.lat ?? points[0]?.lat ?? 36.48,
@@ -110,41 +115,66 @@ export function StressFlightMap({
           />
         )}
         {points.map((p) => {
-          const color = healthColor(p.health_score);
+          const isUploaded = p.pin_kind === "uploaded";
+          const color = isUploaded ? "hsl(220 10% 55%)" : healthColor(p.health_score);
           const selected = selectedId === p.image_id;
           return (
             <CircleMarker
               key={p.image_id}
               center={[p.lat, p.lng]}
-              radius={selected ? 12 : 8}
+              radius={selected ? 12 : isUploaded ? 6 : 8}
               pathOptions={{
                 color: "#fff",
                 weight: selected ? 3 : 2,
                 fillColor: color,
-                fillOpacity: 0.85,
+                fillOpacity: isUploaded ? 0.7 : 0.85,
               }}
               eventHandlers={{ click: () => onSelect?.(p) }}
             >
               <Tooltip sticky>
-                {p.stress_class
-                  ? `${p.stress_class.replace(/_/g, " ")} · `
-                  : ""}
-                Health {p.health_score != null ? Math.round(p.health_score) : "—"}/100
-                <br />
-                {p.lat.toFixed(6)}, {p.lng.toFixed(6)}
-                {p.gps_source ? ` · ${p.gps_source}` : ""}
-                {p.model ? ` · ${p.model}` : ""}
+                {isUploaded ? (
+                  <>
+                    Uploaded photo
+                    {p.upload_source ? ` · ${p.upload_source}` : ""}
+                    <br />
+                    {p.lat.toFixed(6)}, {p.lng.toFixed(6)}
+                    {p.gps_source ? ` · ${p.gps_source}` : ""}
+                  </>
+                ) : (
+                  <>
+                    {p.stress_class
+                      ? `${p.stress_class.replace(/_/g, " ")} · `
+                      : ""}
+                    Health {p.health_score != null ? Math.round(p.health_score) : "—"}/100
+                    <br />
+                    {p.lat.toFixed(6)}, {p.lng.toFixed(6)}
+                    {p.gps_source ? ` · ${p.gps_source}` : ""}
+                    {p.model ? ` · ${p.model}` : ""}
+                  </>
+                )}
               </Tooltip>
             </CircleMarker>
           );
         })}
       </MapContainer>
       <div className="absolute bottom-3 right-3 z-[400] bg-white/95 backdrop-blur rounded-xl shadow-card p-3 text-xs space-y-1.5">
-        <div className="font-semibold mb-1">Stress zones</div>
-        {[
-          { c: healthColor(45), l: "Moderate (35–54)" },
-          { c: healthColor(20), l: "Severe (under 35)" },
-        ].map((i) => (
+        <div className="font-semibold mb-1">
+          {variant === "health" ? "Health by image" : "Stress zones"}
+        </div>
+        {(variant === "health"
+          ? [
+              { c: healthColor(85), l: "Healthy (75+)" },
+              { c: healthColor(65), l: "Mild (55–74)" },
+              { c: healthColor(45), l: "Moderate (35–54)" },
+              { c: healthColor(20), l: "Severe (under 35)" },
+              { c: "hsl(220 10% 55%)", l: "Uploaded (GPS)" },
+            ]
+          : [
+              { c: healthColor(45), l: "Moderate (35–54)" },
+              { c: healthColor(20), l: "Severe (under 35)" },
+              { c: "hsl(220 10% 55%)", l: "Uploaded (GPS)" },
+            ]
+        ).map((i) => (
           <div key={i.l} className="flex items-center gap-2">
             <span className="h-3 w-3 rounded-full" style={{ background: i.c }} /> {i.l}
           </div>

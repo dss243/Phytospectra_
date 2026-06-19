@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     MODELS_STORAGE_PREFIX: str = "_deploy/models"
 
     # Model Configuration
-    MODEL_WEIGHTS_PATH: str = "./models/segformer_b0_v5_1.pt"
+    MODEL_WEIGHTS_PATH: str = "./models/segformer_b0_boxfill.pt"
     MODEL_NAME: str = "nvidia/mit-b0"
     
     # Paths for testing
@@ -53,10 +53,15 @@ class Settings(BaseSettings):
     # Inference settings
     DEVICE: str = "cpu"
     IMG_SIZE: int = 512
-    # SegFormer speed (CPU): downscale long edge, fewer tiles, batch patches
+    # SegFormer: soil = NDVI below threshold; overlay on vegetation only (predict_single.py)
+    SEGFORMER_NDVI_THRESHOLD: float = 0.10
+    SEGFORMER_OVERLAY_ALPHA: float = 0.55
+    # SegFormer: cap longest edge before upsample/overlay (1536 = fast on CPU; 0 = full MAPIR res)
     SEGFORMER_MAX_SIDE: int = 1536
-    SEGFORMER_TILE_OVERLAP: int = 128
-    SEGFORMER_TILE_BATCH: int = 4
+    # Healthy vs stressed label when health % of vegetation is below this (default 55)
+    SEGFORMER_HEALTHY_CLASS_PCT: float = 55.0
+    # Stress alert: notify when >= this % of vegetation pixels are stressed (all images)
+    STRESS_ALERT_STRESSED_PCT: float = 30.0
 
     # Groq AI — set in .env file, never hardcode here
     GROQ_API_KEY: str = ""

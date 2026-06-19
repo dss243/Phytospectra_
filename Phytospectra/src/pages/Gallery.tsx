@@ -130,7 +130,10 @@ function HealthBadge({ result }: { result: SegResult }) {
         <TriangleAlert className="h-3 w-3" />
       )}
       <span className="capitalize">{cls}</span>
-      {confidence != null && (
+      {result.health_score != null && (
+        <span className="opacity-70">· {Math.round(result.health_score)}% health</span>
+      )}
+      {confidence != null && result.health_score == null && (
         <span className="opacity-70">· {confidence} conf.</span>
       )}
     </div>

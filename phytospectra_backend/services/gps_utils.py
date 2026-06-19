@@ -96,3 +96,55 @@ def health_bucket(score: Optional[float]) -> str:
     if score >= 35:
         return "moderate"
     return "severe"
+
+
+def is_map_worthy_stress(
+    health_score: Optional[float],
+    stress_class: Optional[str],
+) -> bool:
+    """
+    Map pins only: moderate + severe (health score under 55).
+    Charts use chart_zone_bucket() and include all SegFormer results.
+    """
+    cls = (stress_class or "").lower()
+    if cls == "healthy":
+        return False
+    if health_score is not None:
+        try:
+            return float(health_score) < 55
+        except (TypeError, ValueError):
+            pass
+    if cls == "stressed":
+        return True
+    return False
+
+
+def chart_zone_bucket(
+    health_score: Optional[float],
+    stress_class: Optional[str],
+) -> str:
+    """All SegFormer rows → health tier for analytics charts (not map pins)."""
+    if health_score is not None:
+        try:
+            return health_bucket(float(health_score))
+        except (TypeError, ValueError):
+            pass
+    cls = (stress_class or "").lower()
+    if cls == "healthy":
+        return "healthy"
+    if cls == "stressed":
+        return "moderate"
+    return "unknown"
+
+
+def stress_zone_bucket(
+    health_score: Optional[float],
+    stress_class: Optional[str],
+) -> Optional[str]:
+    """Map-worthy segmentation → moderate or severe bucket."""
+    if not is_map_worthy_stress(health_score, stress_class):
+        return None
+    bucket = health_bucket(health_score)
+    if bucket in ("moderate", "severe"):
+        return bucket
+    return "moderate"

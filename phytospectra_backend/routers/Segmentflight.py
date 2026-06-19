@@ -5,6 +5,7 @@ import logging
 import os
 import uuid
 import asyncio
+import time
 from typing import Any
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
@@ -15,6 +16,10 @@ from core.connection_manager import manager
 from services import supabase_service
 from services.calibration import extract_gps_from_exif
 from services.gps_utils import normalize_gps
+from services.segformer_inference import (
+    normalize_segformer_stats,
+    should_send_stress_alert,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Segmentation"])
@@ -22,7 +27,7 @@ router = APIRouter(tags=["Segmentation"])
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-# Health score thresholds for severity classification
+# Health score thresholds for alert severity (after SegFormer stats)
 _SEVERITY_HIGH_THRESHOLD   = 40   # health_score < 40  → high
 _SEVERITY_MEDIUM_THRESHOLD = 70   # health_score < 70  → medium
                                    # health_score >= 70 → low
@@ -30,6 +35,40 @@ _SEVERITY_MEDIUM_THRESHOLD = 70   # health_score < 70  → medium
 # Internal alert endpoint (same process)
 _ALERT_URL = "http://localhost:8000/api/alerts/stress"
 _ALERT_TIMEOUT_SECS = 10.0
+
+
+async def _alert_recently_sent(
+    client,
+    *,
+    farmer_id: str,
+    flight_id: str | None,
+    image_id: str,
+    within_minutes: int = 240,
+) -> bool:
+    """Skip if this image already triggered an alert recently (any flight re-run)."""
+    if not client:
+        return False
+    try:
+        from datetime import datetime, timedelta, timezone
+
+        since = (datetime.now(timezone.utc) - timedelta(minutes=within_minutes)).isoformat()
+        needle = f"image:{image_id}"
+        res = (
+            client.table("alerts")
+            .select("id, message")
+            .eq("farmer_id", farmer_id)
+            .eq("alert_type", "stress")
+            .gte("created_at", since)
+            .limit(50)
+            .execute()
+        )
+        for row in res.data or []:
+            msg = row.get("message") or ""
+            if needle in msg:
+                return True
+    except Exception as e:
+        logger.warning("alert dedup check failed: %s", e)
+    return False
 
 
 # ── Storage helpers ───────────────────────────────────────────────────────────
@@ -45,9 +84,9 @@ async def _upload_mask_image(
     user_id: str,
     flight_id: str,
 ) -> str:
-    """Save colourised mask PNG to Supabase, return public URL."""
+    """Save overlay mask PNG to Supabase, return public URL."""
     buf = io.BytesIO()
-    mask_image.save(buf, format="PNG")
+    mask_image.save(buf, format="PNG", optimize=True, compress_level=3)
     buf.seek(0)
 
     mask_filename   = f"mask_{uuid.uuid4().hex[:8]}.png"
@@ -152,16 +191,29 @@ async def _fetch_cached_bulk(image_ids: list[str]) -> dict[str, dict]:
 
 
 def _payload_from_cached(image_id: str, cached: dict) -> dict:
+    h = cached.get("healthy_pixel_count")
+    s = cached.get("stressed_pixel_count")
+    stressed_pct = None
+    if h is not None and s is not None:
+        try:
+            total = int(h) + int(s)
+            if total > 0:
+                stressed_pct = round(int(s) / total * 100, 2)
+        except (TypeError, ValueError):
+            pass
     return {
-        "image_id":          image_id,
-        "mask_url":          cached.get("heatmap_url"),
-        "stress_class":      cached.get("stress_class"),
-        "health_score":      cached.get("health_score"),
-        "health_percentage": cached.get("health_percentage"),
-        "confidence":        cached.get("confidence"),
-        "gps":               normalize_gps(cached.get("gps")),
-        "label_counts":      {},
-        "cached":            True,
+        "image_id":             image_id,
+        "mask_url":             cached.get("heatmap_url"),
+        "stress_class":         cached.get("stress_class"),
+        "health_score":         cached.get("health_score"),
+        "health_percentage":    cached.get("health_percentage"),
+        "stressed_percentage":  stressed_pct,
+        "healthy_pixel_count":  h,
+        "stressed_pixel_count": s,
+        "confidence":           cached.get("confidence"),
+        "gps":                  normalize_gps(cached.get("gps")),
+        "label_counts":         {},
+        "cached":               True,
     }
 
 
@@ -307,15 +359,14 @@ async def _trigger_stress_alert(
     that segmentation results are always returned to the caller.
 
     Skipped entirely when:
-      - stress_class is not "stressed"
+      - stressed vegetation is below STRESS_ALERT_STRESSED_PCT (default 30%)
       - GPS coordinates are unavailable after EXIF + field centroid fallback
     """
-    if stats["stress_class"] != "stressed":
+    stats = normalize_segformer_stats(stats)
+    if not should_send_stress_alert(stats):
         return
 
     client = supabase_service.get_supabase()
-
-    # Resolve GPS: EXIF first, then field centroid fallback
     resolved_gps = await _resolve_gps(gps, field_id, client)
 
     if not resolved_gps or not resolved_gps.get("lat") or not resolved_gps.get("lng"):
@@ -348,7 +399,14 @@ async def _trigger_stress_alert(
                 farmer_id      = flight_res.data[0]["user_id"]
                 resolved_field = flight_res.data[0]["field_id"] or field_id
 
-        severity = _severity_from_score(stats["health_score"])
+        if await _alert_recently_sent(
+            client, farmer_id=farmer_id, flight_id=flight_id, image_id=image_id
+        ):
+            logger.info("Alert skipped (already sent) | image=%s", image_id)
+            return
+
+        health_score = float(stats.get("health_score") or 0)
+        severity = _severity_from_score(health_score)
 
         alert_payload = {
             "farmer_id":    farmer_id,
@@ -356,8 +414,13 @@ async def _trigger_stress_alert(
             "flight_id":    flight_id,
             "lat":          resolved_gps["lat"],
             "lng":          resolved_gps["lng"],
-            "health_score": stats["health_score"],
+            "health_score": health_score,
             "severity":     severity,
+            "message": (
+                f"⚠️ Crop stress on image:{image_id} — "
+                f"{stats.get('stressed_percentage', 100 - health_score):.0f}% stressed vegetation "
+                f"({health_score:.0f}% health)."
+            ),
         }
 
         async with httpx.AsyncClient() as http:
@@ -370,8 +433,12 @@ async def _trigger_stress_alert(
 
         logger.info(
             "Alert triggered | image=%s | flight=%s | "
-            "health=%.1f%% | severity=%s",
-            image_id, flight_id, stats["health_score"], severity,
+            "health=%.1f%% | stressed=%.1f%% | severity=%s",
+            image_id,
+            flight_id,
+            stats.get("health_score", 0),
+            stats.get("stressed_percentage", 0),
+            severity,
         )
 
     except Exception as e:
@@ -404,38 +471,65 @@ async def _process_one_image(
         cached = await _fetch_cached(image_id)
         if cached:
             logger.info(f"Returning cached segmentation for image {image_id}")
-            return _payload_from_cached(image_id, cached)
+            payload = _payload_from_cached(image_id, cached)
+            await _trigger_stress_alert(
+                image_id=image_id,
+                flight_id=flight_id,
+                field_id=field_id,
+                user_id=user_id,
+                stats=payload,
+                gps=normalize_gps(cached.get("gps")),
+            )
+            return payload
 
     # ── Download to temp file ─────────────────────────────────────────────
     ext      = os.path.splitext(storage_path)[1].lower() or ".png"
     tmp_path = os.path.join(tmp_dir, f"seg_{uuid.uuid4().hex}{ext}")
+    t0 = time.perf_counter()
 
     try:
-        await supabase_service.download_image(storage_path, bucket, tmp_path)
+        await asyncio.to_thread(
+            supabase_service.download_image_sync,
+            storage_path,
+            bucket,
+            tmp_path,
+        )
+        t_dl = time.perf_counter() - t0
+        dl_bytes = os.path.getsize(tmp_path) if os.path.exists(tmp_path) else 0
 
-        if not os.path.exists(tmp_path) or os.path.getsize(tmp_path) == 0:
+        if not os.path.exists(tmp_path) or dl_bytes == 0:
             raise RuntimeError(f"Downloaded file is empty: {storage_path}")
 
-        # GPS from EXIF — PNG files will return None here; field centroid
-        # fallback is handled later inside _trigger_stress_alert via _resolve_gps
         gps = extract_gps_from_exif(tmp_path)
 
-        # ── Run SegFormer (thread pool — keeps API responsive on CPU) ─────
         from services.segformer_inference import run_segformer
+        t_inf0 = time.perf_counter()
         result = await asyncio.to_thread(run_segformer, tmp_path)
+        t_inf = time.perf_counter() - t_inf0
 
         stats = {
             "stress_class":         result["stress_class"],
             "confidence":           result["confidence"],
             "health_score":         result["health_score"],
             "health_percentage":    result["health_percentage"],
+            "stressed_percentage":  result["stressed_percentage"],
             "healthy_pixel_count":  result["healthy_pixel_count"],
             "stressed_pixel_count": result["stressed_pixel_count"],
         }
 
-        # ── Upload colourised mask ────────────────────────────────────────
+        t_up0 = time.perf_counter()
         mask_url = await _upload_mask_image(
             result["mask_image"], bucket, image_id, user_id, flight_id or "noflight"
+        )
+        t_up = time.perf_counter() - t_up0
+
+        logger.info(
+            "segment timing image=%s download=%.1fs (%.1fMB) infer=%.1fs upload=%.1fs",
+            image_id,
+            t_dl,
+            dl_bytes / 1_048_576,
+            t_inf,
+            t_up,
         )
 
         # ── Persist segmentation record ───────────────────────────────────
@@ -498,7 +592,7 @@ async def segment_flight(
     """
     Run SegFormer segmentation on all images attached to a flight.
     Pass ?force=true to re-run even when a cached result exists.
-    Automatically triggers stress alerts for any stressed image found.
+    Alerts every image with >= STRESS_ALERT_STRESSED_PCT stressed vegetation (default 30%).
     """
     user_id = user["sub"]
     logger.info("segment_flight | flight_id=%s | user_id=%s", flight_id, user_id)
@@ -570,7 +664,9 @@ async def segment_flight(
             logger.exception("Failed to segment image %s: %s", img_row.get("id"), e)
             errors.append({"image_id": img_row.get("id"), "error": str(e)})
 
-    stressed_count = sum(1 for r in results if r.get("stress_class") == "stressed")
+    stressed_count = sum(
+        1 for r in results if should_send_stress_alert(normalize_segformer_stats(r))
+    )
 
     if results:
         results = await _enrich_results_with_gps(client, results)
@@ -672,9 +768,56 @@ async def segment_single_image(
     return {"status": "success", **result}
 
 
+async def auto_segment_image(image_id: str, user_id: str) -> None:
+    """
+    Run SegFormer on one newly uploaded image (background task).
+    Errors are logged but never raised.
+    """
+    from core.role import is_field_pc
+
+    if is_field_pc():
+        logger.info(
+            "auto_segment_image: skipped on field PC | image_id=%s",
+            image_id,
+        )
+        return
+
+    logger.info("auto_segment_image: starting | image_id=%s user_id=%s", image_id, user_id)
+    client = supabase_service.get_supabase()
+    if not client:
+        logger.warning("auto_segment_image: Supabase unavailable, skipping")
+        return
+
+    try:
+        res = (
+            client.table("images")
+            .select("id, storage_path, bucket_name, flight_id, field_id, drone_id")
+            .eq("id", image_id)
+            .eq("user_id", user_id)
+            .limit(1)
+            .execute()
+        )
+        if not res.data:
+            logger.warning("auto_segment_image: image not found | id=%s", image_id)
+            return
+
+        tmp_dir = os.path.join(settings.OUTPUT_FOLDER, "tmp")
+        os.makedirs(tmp_dir, exist_ok=True)
+
+        await _process_one_image(
+            image_row=res.data[0],
+            user_id=user_id,
+            force=False,
+            tmp_dir=tmp_dir,
+        )
+        logger.info("auto_segment_image: done | image_id=%s", image_id)
+    except Exception as e:
+        logger.exception("auto_segment_image: failed | image_id=%s: %s", image_id, e)
+
+
 async def auto_segment_flight(flight_id: str, user_id: str) -> None:
     """
-    Called automatically after flight images are uploaded.
+    Run SegFormer on every image in a flight (background task).
     Silently runs segmentation and triggers alerts for stressed images.
     Errors are logged but never raised.
     """

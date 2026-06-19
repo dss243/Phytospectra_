@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 MODELS = (
     "vit_ndvi_leaf_health.pt",
-    "segformer_b0_v5_1.pt",
+    "segformer_b0_boxfill.pt",
 )
 
 

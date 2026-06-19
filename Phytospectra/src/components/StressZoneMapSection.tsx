@@ -12,6 +12,7 @@ export function StressZoneMapSection({
   selectedId,
   onSelect,
   emptyHint,
+  variant = "health",
 }: {
   points: StressMapPoint[];
   boundary?: object | null;
@@ -20,6 +21,7 @@ export function StressZoneMapSection({
   selectedId?: string | null;
   onSelect?: (p: StressMapPoint) => void;
   emptyHint?: string;
+  variant?: "stress" | "health";
 }) {
   const mapCenter = {
     lat: center?.lat ?? points[0]?.lat ?? null,
@@ -34,7 +36,7 @@ export function StressZoneMapSection({
     <Card className="p-4 space-y-2">
       <h3 className="text-sm font-semibold flex items-center gap-1.5">
         <MapPin className="h-4 w-4 text-primary" />
-        Stress zones on field
+        {variant === "health" ? "Field map" : "Stress zones on field"}
         {fieldName ? (
           <span className="text-muted-foreground font-normal">· {fieldName}</span>
         ) : null}
@@ -46,17 +48,22 @@ export function StressZoneMapSection({
           center={mapCenter}
           selectedId={selectedId}
           onSelect={onSelect}
+          variant={variant}
         />
         {points.length === 0 && (
           <div className="absolute inset-x-4 top-4 z-[500] rounded-lg bg-card/95 border border-border/60 px-3 py-2 text-xs text-muted-foreground shadow-sm">
             {emptyHint ??
-              "No orange/red stress pins yet. Only moderate & severe zones are shown (health score under 55)."}
+              (variant === "health"
+                ? "No segmented images with GPS yet. Run segmentation on photos with EXIF GPS."
+                : "No orange/red stress pins yet. Only moderate & severe zones are shown (health score under 55).")}
           </div>
         )}
       </div>
       {points.length > 0 && (
         <p className="text-[11px] text-muted-foreground">
-          {points.length} stressed zone{points.length !== 1 ? "s" : ""} · orange = moderate, red = severe
+          {variant === "health"
+            ? `${points.length} pin${points.length !== 1 ? "s" : ""} · color = health score`
+            : `${points.length} stressed zone${points.length !== 1 ? "s" : ""} · orange = moderate, red = severe`}
         </p>
       )}
     </Card>

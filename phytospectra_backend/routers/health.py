@@ -16,12 +16,12 @@ async def health_check():
     from pathlib import Path
     backend_root = Path(__file__).resolve().parents[1]
     vit = backend_root / "models" / "vit_ndvi_leaf_health.pt"
-    seg = backend_root / "models" / "segformer_b0_v5_1.pt"
+    seg = backend_root / "models" / "segformer_b0_boxfill.pt"
     return {
         "status": "ok",
         "models": {
             "vit_ndvi_leaf_health.pt": vit.is_file(),
-            "segformer_b0_v5_1.pt": seg.is_file(),
+            "segformer_b0_boxfill.pt": seg.is_file(),
         },
     }
 
