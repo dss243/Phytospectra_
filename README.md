@@ -187,38 +187,6 @@ Plant Classification  Stress Segmentation
 
 ---
 
-## 📂 Suggested Project Structure
-
-```text
-PhytoSpectra/
-│
-├── public/
-│   ├── logo.jpg
-│   ├── landingpage1
-│   ├── landingpage2
-│   └── landingpage3
-│
-├── data/
-│
-├── preprocessing/
-│
-├── classification/
-│   └── vit/
-│
-├── segmentation/
-│   └── segformer/
-│
-├── notebooks/
-│
-├── dashboard/
-│
-├── requirements.txt
-└── README.md
-```
-
-> Update the folder names above if your repository uses a different structure.
-
----
 
 ## 🚀 Future Development
 
@@ -233,22 +201,13 @@ Future improvements may include:
 * Integration with irrigation planning workflows.
 
 ---
+## 🎥 Platform Demo
 
-## 📄 Platform Documentation
+See PhytoSpectra in action in the following demonstration video:
 
-For more information about the PhytoSpectra platform, visit the following resource:
+**[▶️ Watch the PhytoSpectra Platform Demo](https://drive.google.com/file/d/1-lZkVAkfsAV1eqZdB5yzFpoab6us-sly/view?usp=sharing)**
 
-👉 [PhytoSpectra Platform Documentation](https://drive.google.com/drive/home)
-
-> Make sure the Google Drive file or folder is shared with the appropriate access permissions before publishing the link.
-
----
-
-## 👩‍💻 Project Context
-
-PhytoSpectra was developed as a Master's thesis project in **Artificial Intelligence and Data Science**.
-
-The project explores the use of multispectral imaging and deep learning to support early water-stress analysis in potato crops and improve irrigation-related decision-making.
+The video demonstrates the main platform workflow, including the user interface and how the different components of PhytoSpectra are used for crop monitoring and water-stress analysis.
 
 ---
 
