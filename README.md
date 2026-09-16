@@ -1,7 +1,7 @@
 # 🌱 PhytoSpectra
 
 <p align="center">
-  <img src="public/logo.jpg" alt="PhytoSpectra Logo" width="180"/>
+  <img src="Phytospectra/public/logo.jpg" alt="PhytoSpectra Logo" width="180"/>
 </p>
 
 <h3 align="center">
@@ -30,15 +30,15 @@ PhytoSpectra focuses on two complementary computer vision tasks:
 ## 🖥️ Platform Preview
 
 <p align="center">
-  <img src="public/landingpage1" alt="PhytoSpectra landing page - view 1" width="90%"/>
+  <img src="Phytospectra/public/landingpage1" alt="PhytoSpectra landing page - view 1" width="90%"/>
 </p>
 
 <p align="center">
-  <img src="public/landingpage2" alt="PhytoSpectra landing page - view 2" width="90%"/>
+  <img src="Phytospectra/public/landingpage2" alt="PhytoSpectra landing page - view 2" width="90%"/>
 </p>
 
 <p align="center">
-  <img src="public/landingpage3" alt="PhytoSpectra landing page - view 3" width="90%"/>
+  <img src="Phytospectra/public/landingpage3" alt="PhytoSpectra landing page - view 3" width="90%"/>
 </p>
 
 ---
