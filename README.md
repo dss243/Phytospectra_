@@ -1,4 +1,4 @@
-# 🌱 PhytoSpectra
+#  PhytoSpectra
 
 <p align="center">
   <img src="Phytospectra/public/logowithoutbackground" alt="PhytoSpectra Logo" width="380"/>
@@ -27,7 +27,7 @@ PhytoSpectra focuses on two complementary computer vision tasks:
 
 ---
 
-## 🖥️ Platform Preview
+## Platform Preview
 
 <p align="center">
   <img src="Phytospectra/public/landingpage1" alt="PhytoSpectra landing page - view 1" width="90%"/>
@@ -43,7 +43,7 @@ PhytoSpectra focuses on two complementary computer vision tasks:
 
 ---
 
-## 🎯 Project Objectives
+##  Project Objectives
 
 PhytoSpectra aims to:
 
@@ -56,7 +56,7 @@ PhytoSpectra aims to:
 
 ---
 
-## 🧠 AI Pipeline
+## AI Pipeline
 
 PhytoSpectra uses two complementary deep learning models for different levels of analysis.
 
@@ -121,7 +121,7 @@ It produces pixel-level predictions for healthy and stressed regions.
 
 ---
 
-## 🛰️ System Concept
+##  System Concept
 
 The proposed platform combines UAV-based multispectral imaging with AI-powered analysis.
 
@@ -157,7 +157,7 @@ Plant Classification  Stress Segmentation
 
 ---
 
-## 🛠️ Technologies
+##  Technologies
 
 ### Artificial Intelligence and Computer Vision
 
@@ -188,7 +188,7 @@ Plant Classification  Stress Segmentation
 ---
 
 
-## 🚀 Future Development
+##  Future Development
 
 Future improvements may include:
 
@@ -212,5 +212,5 @@ The video demonstrates the main platform workflow, including the user interface 
 ---
 
 <p align="center">
-  🌱 <strong>PhytoSpectra — Turning multispectral data into actionable crop insights.</strong>
+   <strong>PhytoSpectra — Turning multispectral data into actionable crop insights.</strong>
 </p>
