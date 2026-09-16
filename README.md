@@ -207,6 +207,9 @@ See PhytoSpectra in action in the following demonstration video:
 
 **[▶️ Watch the PhytoSpectra Platform Demo](https://drive.google.com/file/d/1-lZkVAkfsAV1eqZdB5yzFpoab6us-sly/view?usp=sharing)**
 
+<p align="center">
+  <img src="Phytospectra/public/mvp" alt="PhytoSpectra mvp" width="380"/>
+</p>
 The video demonstrates the main platform workflow, including the user interface and how the different components of PhytoSpectra are used for crop monitoring and water-stress analysis.
 
 ---
