@@ -1,7 +1,7 @@
 # 🌱 PhytoSpectra
 
 <p align="center">
-  <img src="Phytospectra/public/logo.jpg" alt="PhytoSpectra Logo" width="180"/>
+  <img src="Phytospectra/public/logowithoutbackground" alt="PhytoSpectra Logo" width="380"/>
 </p>
 
 <h3 align="center">
