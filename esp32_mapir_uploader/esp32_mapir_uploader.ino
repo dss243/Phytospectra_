@@ -36,20 +36,20 @@
 #include <cstring>
 
 // ── Network credentials ────────────────────────────────────────────────────
-const char* CAM_SSID  = "MAPIR-S3WRGN-dbddbe";
+const char* CAM_SSID  = "MAPIR-xxxxxxxx";
 const char* CAM_PASS  = "12345678";
-const char* CAM_IP    = "192.168.1.254";
+const char* CAM_IP    = ";
 
 const char* HOME_SSID = "Wifi_network";
-const char* HOME_PASS = "0798200237";
+const char* HOME_PASS = "";
 
 // ── Backend ────────────────────────────────────────────────────────────────
-const char*    BACKEND_URL  = "http://172.16.179.238:8000";
-const char*    BACKEND_HOST = "172.16.179.238";
+const char*    BACKEND_URL  = "";
+const char*    BACKEND_HOST = "";
 const uint16_t BACKEND_PORT = 8000;
 
 // ── Device identity ────────────────────────────────────────────────────────
-const char* DEVICE_ID     = "esp32-mapir-01";
+const char* DEVICE_ID     = "esp32-xxxxx";
 const char* ESP32_API_KEY = "esp32-dev-key";
 const char* FW_VERSION    = "2026-06-18-fix5";
 
