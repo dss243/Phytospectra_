@@ -1,4 +1,4 @@
-#  PhytoSpectra
+# PhytoSpectra
 
 <p align="center">
   <img src="Phytospectra/public/logowithoutbackground" alt="PhytoSpectra Logo" width="380"/>
@@ -10,6 +10,12 @@
 
 <p align="center">
   <strong>Early crop stress analysis for smarter irrigation decisions.</strong>
+</p>
+
+<p align="center">
+  🌐 <a href="https://phytospectra.vercel.app/" target="_blank">
+    <strong>Visit the Live Platform →</strong>
+  </a>
 </p>
 
 ---
@@ -27,7 +33,19 @@ PhytoSpectra focuses on two complementary computer vision tasks:
 
 ---
 
-## Platform Preview
+## 🌐 Live Platform
+
+The PhytoSpectra platform is deployed and available online:
+
+<p align="center">
+  <a href="https://phytospectra.vercel.app/" target="_blank">
+    <strong>🚀 Open PhytoSpectra →</strong>
+  </a>
+</p>
+
+---
+
+## 🖥️ Platform Preview
 
 <p align="center">
   <img src="Phytospectra/public/landingpage1" alt="PhytoSpectra landing page - view 1" width="90%"/>
@@ -43,7 +61,7 @@ PhytoSpectra focuses on two complementary computer vision tasks:
 
 ---
 
-##  Project Objectives
+## 🎯 Project Objectives
 
 PhytoSpectra aims to:
 
@@ -56,7 +74,7 @@ PhytoSpectra aims to:
 
 ---
 
-## AI Pipeline
+## 🤖 AI Pipeline
 
 PhytoSpectra uses two complementary deep learning models for different levels of analysis.
 
@@ -121,7 +139,7 @@ It produces pixel-level predictions for healthy and stressed regions.
 
 ---
 
-##  System Concept
+## 🌱 System Concept
 
 The proposed platform combines UAV-based multispectral imaging with AI-powered analysis.
 
@@ -157,9 +175,9 @@ Plant Classification  Stress Segmentation
 
 ---
 
-##  Technologies
+## 🛠️ Technologies
 
-### Artificial Intelligence and Computer Vision
+### Artificial Intelligence & Computer Vision
 
 * Python
 * PyTorch
@@ -177,7 +195,7 @@ Plant Classification  Stress Segmentation
 * Data augmentation
 * Pixel-level segmentation
 
-### Platform and IoT Components
+### Platform & IoT Components
 
 * React
 * ESP32
@@ -187,8 +205,35 @@ Plant Classification  Stress Segmentation
 
 ---
 
+## 🔬 Key Features
 
-##  Future Development
+* 🌱 Early water-stress detection
+* 🛰️ Multispectral crop image analysis
+* 🤖 AI-powered plant classification
+* 🧠 Vision Transformer-based prediction
+* 🗺️ Region-level stress segmentation
+* 📊 Crop monitoring dashboard
+* 💧 Irrigation decision support
+* 📡 IoT integration using ESP32
+* 🚁 UAV-based multispectral data acquisition
+
+---
+
+## 🎥 Platform Demo
+
+See PhytoSpectra in action in the following demonstration video:
+
+**[▶️ Watch the PhytoSpectra Platform Demo](https://drive.google.com/file/d/1-lZkVAkfsAV1eqZdB5yzFpoab6us-sly/view?usp=sharing)**
+
+<p align="center">
+  <img src="Phytospectra/public/mvp" alt="PhytoSpectra MVP" width="380"/>
+</p>
+
+The video demonstrates the main platform workflow, including the user interface and how the different components of PhytoSpectra are used for crop monitoring and water-stress analysis.
+
+---
+
+## 🚀 Future Development
 
 Future improvements may include:
 
@@ -201,19 +246,19 @@ Future improvements may include:
 * Integration with irrigation planning workflows.
 
 ---
-## 🎥 Platform Demo
 
-See PhytoSpectra in action in the following demonstration video:
+## 🌾 Project Vision
 
-**[▶️ Watch the PhytoSpectra Platform Demo](https://drive.google.com/file/d/1-lZkVAkfsAV1eqZdB5yzFpoab6us-sly/view?usp=sharing)**
-
-<p align="center">
-  <img src="Phytospectra/public/mvp" alt="PhytoSpectra mvp" width="380"/>
-</p>
-The video demonstrates the main platform workflow, including the user interface and how the different components of PhytoSpectra are used for crop monitoring and water-stress analysis.
+PhytoSpectra aims to bridge **multispectral imaging, artificial intelligence, and precision agriculture** to help transform raw crop data into useful insights for monitoring plant health and supporting smarter irrigation practices.
 
 ---
 
 <p align="center">
-   <strong>PhytoSpectra — Turning multispectral data into actionable crop insights.</strong>
+  <strong>PhytoSpectra — Turning multispectral data into actionable crop insights.</strong>
+</p>
+
+<p align="center">
+  🌐 <a href="https://phytospectra.vercel.app/" target="_blank">
+    <strong>Explore the Live Platform →</strong>
+  </a>
 </p>
